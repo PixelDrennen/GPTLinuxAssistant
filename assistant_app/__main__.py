@@ -13,10 +13,10 @@ from urllib.parse import urlsplit
 
 from gi.repository import GLib
 from PyQt5.QtCore import QSettings, QTimer, Qt, QUrl, pyqtSignal
-from PyQt5.QtGui import QDesktopServices, QTextOption
+from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QStyle, QSystemTrayIcon, QTextBrowser, QToolButton,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QStyle, QSystemTrayIcon, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -24,6 +24,7 @@ from .chats import ChatStore
 from .desktop import Desktop
 from .drafting import complete
 from .ipc import LocalBridge
+from .journal import ChatJournal
 from .live import VoiceMeter
 from .session import Session
 from .speech import Microphone
@@ -176,11 +177,7 @@ class Window(QMainWindow):
         title.setFont(title_font)
         stack.addWidget(title)
 
-        self.journal = QTextBrowser()
-        self.journal.setObjectName("journal")
-        self.journal.setOpenLinks(False)
-        self.journal.setAccessibleName("Chat and activity")
-        self.journal.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        self.journal = ChatJournal()
         stack.addWidget(self.journal, 1)
         self.settings = self.popup("Settings", 580, 520)
         form = QFormLayout(self.settings)
@@ -671,10 +668,7 @@ class Window(QMainWindow):
     def load_chat(self):
         chat = self.history.chat
         self.chat_title.setText(chat.title)
-        self.journal.clear()
-        self.journal.setHtml("".join(self.entry_html(*entry) for entry in chat.entries))
-        bar = self.journal.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        self.journal.set_entries("".join(self.entry_html(*entry) for entry in chat.entries))
         self.chat_list.blockSignals(True)
         self.chat_list.clear()
         for chat_id, title, updated in self.history.index():
@@ -732,7 +726,7 @@ class Window(QMainWindow):
                     item.setText(chat.title)
             entry = [datetime.now().strftime("%H:%M:%S"), source, text[:24000]]
             chat.entries.append(entry)
-            self.journal.append(self.entry_html(*entry))
+            self.journal.append_entry(self.entry_html(*entry))
             self.history_timer.start()
 
     def mic_sample(self, generation, amount):

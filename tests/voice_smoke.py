@@ -156,9 +156,44 @@ def main():
     assert restarted.current_provider == "openai"
     with open(restarted.profile_settings.fileName(), encoding="utf8") as config:
         assert "test-wallet-key" not in config.read()
+    restarted.history.chat.entries = [
+        ["12:00:00", "Assistant", f"Saved message {number}. " * 15] for number in range(100)
+    ]
+    restarted.load_chat()
+    restarted.show()
+    settle()
+    bar = restarted.journal.verticalScrollBar()
+    assert bar.maximum() > 0 and bar.value() == bar.maximum()
+
+    restarted.session.start()
+    for number in range(5):
+        restarted.log("Assistant", f"New message {number}. " * 20)
+    settle()
+    assert bar.value() == bar.maximum()
+    restarted.resize(920, 600)
+    settle()
+    assert bar.value() == bar.maximum()
+
+    bar.setValue(bar.maximum() // 2)
+    reading_position = bar.value()
+    restarted.log("Assistant", "Keep the current viewport while reading older messages.")
+    settle()
+    assert bar.value() == reading_position
+    bar.setValue(bar.maximum())
+    restarted.log("Assistant", "Resume following new messages.")
+    settle()
+    assert bar.value() == bar.maximum()
+    restarted.new_chat()
+    assert "Saved message" not in restarted.journal.toPlainText()
+    old_chat = next(chat_id for chat_id, _, _ in restarted.history.index()
+                    if chat_id != restarted.history.chat.id)
+    restarted.change_chat(old_chat)
+    settle()
+    assert bar.maximum() > 0 and bar.value() == bar.maximum()
+
     restarted.history.close()
     scratch.cleanup()
-    print("Voice dashboard, clarification, window routing, playback isolation and voice approval passed.")
+    print("Voice dashboard, clarification, window routing, playback isolation, voice approval and chat scrolling passed.")
 
 
 if __name__ == "__main__":
