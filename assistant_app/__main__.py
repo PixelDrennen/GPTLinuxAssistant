@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from threading import Thread
+from threading import Event, Thread
 from urllib.parse import urlsplit
 
 from gi.repository import GLib
@@ -24,10 +24,12 @@ from .live import VoiceMeter
 from .session import Session
 from .speech import Microphone
 from .voice import Speaker
+from .window_view import CaptureCanceled, MONITOR, WINDOW, capture_frame
 
 
 class Window(QMainWindow):
     drafted = pyqtSignal(object, object, str)
+    viewed = pyqtSignal(object, object, str)
 
     def __init__(self, session, args):
         super().__init__()
@@ -50,6 +52,8 @@ class Window(QMainWindow):
         self.last_reply = ""
         self.last_turn = None
         self.drafted.connect(self.draft_finished)
+        self.viewed.connect(self.view_finished)
+        self.view_job = None
         self.mode = None
         self.model_job = None
         self.previewed = None
@@ -88,6 +92,7 @@ class Window(QMainWindow):
         self.start_button = self.button(row, "Start listening", self.start)
         self.pause_button = self.button(row, "Pause", self.pause)
         self.button(row, "Ask by voice", self.ask_voice)
+        self.view_button = self.button(row, "Look at a window", self.look_at_window)
         self.offer = self.button(row, "Review suggestion", self.follow_suggestion)
         self.offer.hide()
 
@@ -132,7 +137,15 @@ class Window(QMainWindow):
         self.spoken = QCheckBox("Speak replies")
         self.spoken.setChecked(True)
         self.spoken.toggled.connect(self.speech_setting)
-        form.addRow(self.spoken)
+        self.voice_choice = QComboBox()
+        for label, value in (("Follow reply provider", "auto"), ("OpenAI · Marin", "marin"),
+                             ("OpenAI · Cedar", "cedar"), ("Local eSpeak NG", "local")):
+            self.voice_choice.addItem(label, value)
+        form.addRow(self.spoken, self.voice_choice)
+        self.conversation = QCheckBox("Conversation mode · respond when I speak")
+        self.conversation.setChecked(True)
+        self.conversation.toggled.connect(self.update_cloud_notice)
+        form.addRow(self.conversation)
         self.provider = QComboBox()
         self.provider.addItem("Local Ollama", "ollama")
         self.provider.addItem("OpenAI API", "openai")
@@ -145,9 +158,10 @@ class Window(QMainWindow):
         form.addRow(self.provider, self.model)
         self.include_narration = QCheckBox("Include recent narration and app focus in model requests")
         form.addRow(self.include_narration)
-        self.cloud_notice = self.label("OpenAI receives request text and the selected draft or excerpt. Microphone audio stays local.")
+        self.cloud_notice = self.label("")
         form.addRow(self.cloud_notice)
-        self.cloud_notice.setVisible(self.current_provider == "openai")
+        self.voice_choice.currentIndexChanged.connect(self.update_cloud_notice)
+        self.update_cloud_notice()
         self.window_access = QCheckBox("Use KWin app identities")
         self.window_access.toggled.connect(self.set_windows)
         self.exclude = QLineEdit()
@@ -291,6 +305,7 @@ class Window(QMainWindow):
             self.last_status = "Listening"
 
     def pause(self):
+        self.cancel_view()
         self.audio.stop()
         self.speaker.stop()
         self.speaking = False
@@ -334,14 +349,36 @@ class Window(QMainWindow):
         self.output.clear()
 
     def switch_provider(self):
+        self.cancel_view()
         self.models[self.current_provider] = self.model.text()
         self.current_provider = self.provider.currentData()
         self.model.setText(self.models[self.current_provider])
-        self.cloud_notice.setVisible(self.current_provider == "openai")
+        self.update_cloud_notice()
         self.model_job = None
         self.clarification = None
         self.waiting_for_share = None
         self.last_turn = None
+
+    def cloud_voice(self):
+        voice = self.voice_choice.currentData()
+        if voice == "auto":
+            return "marin" if self.current_provider == "openai" else None
+        return None if voice == "local" else voice
+
+    def update_cloud_notice(self):
+        notes = []
+        if self.current_provider == "openai":
+            notes.append("OpenAI receives spoken text in conversation mode, plus any shared draft or excerpt used in a request."
+                         if self.conversation.isChecked() else
+                         "OpenAI receives request text and any shared draft or excerpt used in the request.")
+        if self.cloud_voice():
+            notes.append("The OpenAI voice sends the assistant’s spoken text for synthesis.")
+        if notes:
+            notes.append("Microphone audio stays local.")
+        self.cloud_notice.setText(" ".join(notes))
+        self.cloud_notice.setVisible(bool(notes))
+        self.view_button.setToolTip("Share one frame with OpenAI." if self.current_provider == "openai"
+                                    else "Share one frame with the local model.")
 
     def log(self, source, text):
         if self.session.active and text:
@@ -358,6 +395,7 @@ class Window(QMainWindow):
 
     def speaker_sample(self, generation, amount):
         if generation == self.speaker.generation and self.speaking:
+            self.audio_status = "Assistant speaking · microphone paused"
             self.ai_meter.sample(amount)
 
     def speech_setting(self, enabled):
@@ -384,14 +422,19 @@ class Window(QMainWindow):
             self.log("Assistant", text)
         if not self.spoken.isChecked():
             return
+        voice = self.cloud_voice()
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip() if voice else None
+        if voice and not api_key:
+            self.log("Audio", "Set OPENAI_API_KEY to use the selected voice.")
+            return
         self.audio.stop()
         self.mode = None
         self.voice_approval = None
         self.mic_meter.clear()
         self.partial.clear()
         self.speaking = True
-        self.audio_status = "Assistant speaking · microphone paused"
-        self.speaker.start(text[:420])
+        self.audio_status = "Preparing speech · microphone paused"
+        self.speaker.start(text[:420], api_key=api_key, voice=voice or "marin")
 
     def refresh_audio(self):
         if self.speaking:
@@ -447,31 +490,47 @@ class Window(QMainWindow):
             return
         self.audio_status = "Microphone listening"
         words = " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
-        self.log("You", text)
-        if words in ("assistant approve", "assistant decline"):
+        if not words:
+            return
+        if words in ("assistant approve", "assistant decline", "approve it", "decline it",
+                     "yes apply it", "no cancel it"):
+            self.log("You", text)
             if (confidence >= 0.85 and self.voice_approval == (generation, self.previewed)
                     and self.review.isVisible() and self.session.proposal):
-                self.respond(words.endswith("approve"), self.previewed)
+                self.respond(words in ("assistant approve", "approve it", "yes apply it"), self.previewed)
             else:
                 self.log("Approval", "No matching spoken approval. Use the visible preview.")
             return
         if self.mode:
             action, proposal_id, expires = self.mode
-            self.refresh_audio()
-            if expires < self.session.clock():
-                return
-            if action == "reply":
-                if words in ("yes", "no") and confidence >= 0.85 and self.review.isVisible():
-                    self.respond(words == "yes", proposal_id)
-                else:
-                    self.message("Voice reply was unclear. Use the approval buttons.")
-                return
-            self.ask(voice_request=text)
+            self.mode = None
+            if expires >= self.session.clock():
+                if action == "reply":
+                    self.log("You", text)
+                    if words in ("yes", "no") and confidence >= 0.85 and self.review.isVisible():
+                        self.respond(words == "yes", proposal_id)
+                    else:
+                        self.message("Voice reply was unclear. Use the approval buttons.")
+                    return
+                if words != "assistant":
+                    request = re.sub(r"^assistant[\W_]+", "", text, flags=re.IGNORECASE).strip()
+                    self.request_from_speech(request)
+                    return
+        if words == "assistant":
+            self.mode = ("ask", "", self.session.clock() + 8)
+            self.audio_status = "Listening for your request"
         elif words.startswith("assistant "):
-            request = re.sub(r"^assistant[\W_]*", "", text, flags=re.IGNORECASE).strip()
-            self.ask(voice_request=request)
+            request = re.sub(r"^assistant[\W_]+", "", text, flags=re.IGNORECASE).strip()
+            self.request_from_speech(request)
+        elif self.conversation.isChecked() or (self.clarification and self.clarification[0] > self.session.clock()):
+            self.request_from_speech(text)
         else:
+            self.log("You", text)
             self.session.narrate(text)
+
+    def request_from_speech(self, request):
+        self.log("You", request)
+        self.ask(voice_request=request)
 
     def message(self, text):
         with self.session.lock:
@@ -504,7 +563,7 @@ class Window(QMainWindow):
             epoch = self.session.epoch
         if blocked:
             if voice:
-                self.log("Approval", "Review the pending action or say Assistant decline.")
+                self.log("Approval", "Review the pending action or say decline it.")
             else:
                 self.message("Resolve the current proposal first.")
             return
@@ -526,9 +585,14 @@ class Window(QMainWindow):
             self.clarification = None
             self.waiting_for_share = None
             self.model_job = None
+            self.cancel_view()
             self.say("Request canceled.")
             return
-        if self.model_job:
+        visual = re.match(r"^(?:please |can you |could you )?look at (?:this |the |my |a )?(window|screen|game)\b", request, re.IGNORECASE)
+        if visual:
+            self.look_at_window(request, MONITOR if visual[1].casefold() == "screen" else WINDOW)
+            return
+        if self.model_job or self.view_job:
             self.answer("A reply is already being prepared.", voice)
             return
 
@@ -593,8 +657,6 @@ class Window(QMainWindow):
                self.input.toPlainText(), voice, request, model)
         self.model_job = job
         self.message("Preparing a reply.")
-        if voice:
-            self.log("Request", request)
 
         def generate():
             try:
@@ -604,6 +666,77 @@ class Window(QMainWindow):
                 self.drafted.emit(job, None, str(exc))
 
         Thread(target=generate, daemon=True).start()
+
+    def cancel_view(self):
+        if self.view_job is not None:
+            self.view_job[0].set()
+            self.view_job = None
+
+    def look_at_window(self, request=None, source=WINDOW):
+        if not self.session.active:
+            self.message("Start listening before sharing a window.")
+            return
+        with self.session.lock:
+            self.session.expire()
+            blocked = self.session.proposal or self.session.command
+        if blocked or self.view_job or self.model_job:
+            self.message("Finish the current request before sharing a window.")
+            return
+        model = self.model.text().strip()
+        if not model:
+            self.answer("Choose a vision-capable model under Setup first.", True)
+            return
+        cloud = self.current_provider == "openai"
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip() if cloud else None
+        if cloud and not api_key:
+            self.answer("Set your OpenAI API key before sharing a window.", True)
+            return
+        if not isinstance(request, str):
+            request = self.request.text().strip() or "Briefly describe what is visible and how you could help."
+        target = "screen" if source == MONITOR else "window"
+        destination = "OpenAI" if cloud else "the local model"
+        self.waiting_for_share = None
+        self.clarification = None
+        self.message(f"Choose a {target} to share one frame with {destination}.")
+        job = (Event(), self.session.epoch, model, request)
+        self.view_job = job
+        cancel = job[0]
+
+        def inspect():
+            try:
+                frame = capture_frame(source, cancel)
+                if cancel.is_set():
+                    return
+                result = complete(model, "", request, {}, "general", api_key=api_key, image=frame)
+                self.viewed.emit(job, result, "")
+            except CaptureCanceled:
+                self.viewed.emit(job, None, "")
+            except (GLib.Error, OSError, ValueError, RuntimeError, KeyError) as exc:
+                self.viewed.emit(job, None, str(exc))
+
+        Thread(target=inspect, daemon=True).start()
+
+    def view_finished(self, job, result, error):
+        if self.view_job is not job:
+            return
+        self.view_job = None
+        if not self.session.active or job[1] != self.session.epoch:
+            return
+        if error:
+            self.message("Window view failed. " + error)
+            self.say("I couldn't view that source. Check the activity log for details.")
+        elif result is None:
+            self.message("Window sharing canceled.")
+        elif result.question:
+            self.answer(result.question, True)
+        else:
+            self.last_reply = result.draft
+            self.last_turn = ("general", job[3][:1200], result.draft[:1600])
+            self.output.setPlainText(result.draft)
+            self.message("Listening")
+            self.log("Assistant", result.draft)
+            spoken = result.draft if len(result.draft) <= 400 else "I reviewed the window. The full reply is in the activity log."
+            self.say(spoken, record=False)
 
     def draft_finished(self, job, result, error):
         if self.model_job is not job:
@@ -628,7 +761,7 @@ class Window(QMainWindow):
         if result.question:
             if voice:
                 self.clarification = (self.session.clock() + 90, self.current_provider, kind, request, result.question)
-                self.answer(result.question + " Start your answer with Assistant.", True)
+                self.answer(result.question, True)
             else:
                 self.message(result.question + "\nAdd the answer to the Task field.")
                 self.request.setFocus()
@@ -640,7 +773,7 @@ class Window(QMainWindow):
             if kind == "rider":
                 self.show_panel()
             else:
-                self.message("Reply ready. Say Assistant copy that to use it in another app.")
+                self.message("Listening")
                 self.log("Assistant", result.draft)
                 spoken = result.draft if len(result.draft) <= 400 else "I prepared a longer reply. It is in the activity log and Draft box."
                 self.say(spoken, record=False)
@@ -766,7 +899,8 @@ class Window(QMainWindow):
         now_status = status.split("\nShared:", 1)[0]
         if now_status != self.last_status:
             self.last_status = now_status
-            self.log("Session", now_status)
+            if now_status not in ("Preparing a reply.", "Listening", "Review the proposed edit."):
+                self.log("Session", now_status)
             if active and (now_status.startswith(("Applied ", "Skipped.", "The editor reported",
                                                   "Draft copied.", "Link handed", "Could not open",
                                                   "No confirmation")) or now_status == "Declined."):
@@ -784,8 +918,9 @@ class Window(QMainWindow):
                 if self.tray.isVisible() and not self.isVisible():
                     self.tray.showMessage(title, message)
                 self.log("Suggestion", message)
-                if not self.speaking and not self.model_job and not proposal:
-                    self.say(message + " Say Assistant, review suggestion.", record=False)
+                if not self.speaking and not self.model_job and not self.view_job and not proposal:
+                    command = "review suggestion" if self.conversation.isChecked() else "Assistant, review suggestion"
+                    self.say(f"{message} Say {command}.", record=False)
         proposal_id = proposal.id if proposal else None
         if self.mode and (self.mode[2] < session.clock() or (self.mode[0] == "reply" and self.mode[1] != proposal_id)):
             self.refresh_audio()
@@ -805,7 +940,7 @@ class Window(QMainWindow):
                 self.log("Approval", f"{label} · {proposal.after}")
                 action = {"rider": "The Rider replacement", "unity": "The Unity connection",
                           "desktop": proposal.target.label}[proposal.target.kind]
-                hint = (" Say Assistant approve or Assistant decline." if self.mic.isChecked()
+                hint = (" Say approve it or decline it." if self.mic.isChecked()
                         and self.mic_path.text().strip() else "")
                 self.say(action + " is ready to review." + hint)
                 if not self.speaking:
@@ -847,6 +982,7 @@ def main():
         if "window" in locals():
             window.audio.stop()
             window.speaker.stop()
+            window.cancel_view()
         bridge.close()
 
 

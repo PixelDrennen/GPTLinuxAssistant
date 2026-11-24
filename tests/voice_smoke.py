@@ -28,6 +28,7 @@ def main():
     def hear(text, confidence=1.0):
         window.heard(window.audio.generation, text, confidence)
 
+    window.conversation.setChecked(False)
     hear("I'm wiring up a fallback dialogue line.")
     assert "fallback dialogue line" in window.journal.toPlainText()
     with patch("assistant_app.__main__.complete") as model:
@@ -35,41 +36,63 @@ def main():
             DraftResult("", "Which prefab?"),
             DraftResult("Open the Training prefab in Prefab Mode.", ""),
         ]
-        hear("Assistant, how do I edit this?")
+        hear("assistant")
+        model.assert_not_called()
+        hear("how do I edit this?")
         settle()
-        hear("Assistant, the Training prefab")
+        hear("the Training prefab")
         settle()
         assert "My answer: the Training prefab" in model.call_args.args[2]
         assert not session.proposal
-        assert "Open the Training prefab in Prefab Mode." in window.journal.toPlainText()
+        journal = window.journal.toPlainText()
+        assert "Open the Training prefab in Prefab Mode." in journal
+        assert journal.count("how do I edit this?") == 1
+        assert "Request  ·" not in journal
+        assert "Preparing a reply" not in journal and "Reply ready" not in journal
+
+    window.conversation.setChecked(True)
+    with patch("assistant_app.__main__.complete", return_value=DraftResult("Hello!", "")) as model:
+        hear("say hello")
+        settle()
+        assert model.call_args.args[2] == "say hello"
+        assert window.journal.toPlainText().count("say hello") == 1
+
+    with patch("assistant_app.__main__.capture_frame", return_value=b"frame") as capture, \
+            patch("assistant_app.__main__.complete", return_value=DraftResult("A game inventory.", "")) as model:
+        hear("Can you look at this game and tell me what's visible?")
+        settle()
+        assert capture.call_args.args[0] == 2
+        assert model.call_args.kwargs["image"] == b"frame"
+        assert not session.proposal
+        assert window.last_reply == "A game inventory."
 
     window.mic_path.setText("simulated-model")
     window.audio.read_audio = lambda *args: None
     window.mic.setChecked(True)
-    hear("Assistant copy that")
+    hear("copy that")
     assert session.proposal
     old_generation = window.audio.generation - 1
     hear("yes")
     hear("Assistant approve", 0.50)
     window.heard(old_generation, "Assistant approve", 1.0)
     assert not app.clipboard().text()
-    hear("Assistant approve")
-    assert app.clipboard().text() == "Open the Training prefab in Prefab Mode."
+    hear("yes, apply it")
+    assert app.clipboard().text() == "A game inventory."
     assert not session.proposal
 
     window.spoken.setChecked(True)
     with patch.object(window.speaker, "start") as synthesize:
         window.say("Hello")
-        synthesize.assert_called_once_with("Hello")
+        synthesize.assert_called_once_with("Hello", api_key=None, voice="marin")
         current = window.audio.generation
         window.heard(current, "Assistant copy that", 1.0)
         assert not session.proposal
         window.speaker_finished(window.speaker.generation, "")
     assert not window.speaking
 
-    hear("Assistant pause")
+    hear("pause")
     assert not session.active and not window.journal.toPlainText()
-    print("Voice dashboard, clarification, playback isolation and voice approval passed.")
+    print("Voice dashboard, clarification, window routing, playback isolation and voice approval passed.")
 
 
 if __name__ == "__main__":

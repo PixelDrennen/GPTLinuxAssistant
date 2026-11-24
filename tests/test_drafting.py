@@ -38,3 +38,19 @@ class DraftingTests(unittest.TestCase):
         self.assertFalse(payload["store"])
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
         self.assertEqual("Try Prefab Mode.", result.draft)
+
+    @patch("assistant_app.drafting.loopback_opener")
+    def test_image_is_attached_only_to_the_selected_provider(self, opener):
+        response = json.dumps({"draft": "An inventory window.", "question": ""})
+        opener.return_value.open.return_value = io.BytesIO(json.dumps({
+            "choices": [{"message": {"content": response}}],
+        }).encode())
+        complete("gpt-4.1-mini", "", "Look at this game", {}, "general", api_key="test-key", image=b"frame")
+        payload = json.loads(opener.return_value.open.call_args.args[0].data)
+        parts = payload["messages"][1]["content"]
+        self.assertEqual("data:image/jpeg;base64,ZnJhbWU=", parts[1]["image_url"]["url"])
+        opener.return_value.open.return_value = io.BytesIO(json.dumps({"response": response}).encode())
+        complete("local-vision", "", "Look at this game", {}, "general", image=b"frame")
+        call = opener.return_value.open.call_args.args[0]
+        self.assertEqual("http://127.0.0.1:11434/api/generate", call.full_url)
+        self.assertEqual(["ZnJhbWU="], json.loads(call.data)["images"])

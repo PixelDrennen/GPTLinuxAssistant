@@ -1,12 +1,19 @@
-"""Local speech output and metering from the PCM sent to PipeWire."""
+"""Speech synthesis and metering from the PCM sent to PipeWire."""
 from array import array
+from contextlib import contextmanager
+from http.client import HTTPException
 from io import BytesIO
+import json
 import math
 import subprocess
 import sys
 from threading import Event, Lock, Thread
 from time import monotonic
 import wave
+from urllib.error import HTTPError
+from urllib.request import Request
+
+from .ipc import loopback_opener
 
 from PyQt5.QtCore import QObject, pyqtSignal
 
@@ -33,10 +40,10 @@ class Speaker(QObject):
         self.lock = Lock()
         self.process = None
 
-    def start(self, text):
+    def start(self, text, *, api_key=None, voice="marin"):
         self.stop()
         cancel = self.cancel = Event()
-        Thread(target=self.play, args=(self.generation, cancel, text), daemon=True).start()
+        Thread(target=self.play, args=(self.generation, cancel, text, api_key, voice), daemon=True).start()
 
     def stop(self):
         self.generation += 1
@@ -53,43 +60,68 @@ class Speaker(QObject):
             self.process = process
             return process
 
-    def play(self, generation, cancel, text):
+    @contextmanager
+    def audio_source(self, cancel, text, api_key, voice):
+        if api_key is not None:
+            request = Request("https://api.openai.com/v1/audio/speech", data=json.dumps({
+                "model": "gpt-4o-mini-tts",
+                "voice": voice,
+                "input": text,
+                "instructions": "Speak conversationally, with natural intonation and a brisk, clear pace.",
+                "response_format": "pcm",
+            }).encode(), headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
+            try:
+                with loopback_opener().open(request, timeout=12) as stream:
+                    yield 24000, stream.read
+            except HTTPError as error:
+                raise RuntimeError(f"OpenAI speech request failed (HTTP {error.code}).") from None
+            return
+
+        synthesizer = self.spawn(cancel, ["espeak-ng", "--stdin", "--stdout", "-s", "180"],
+                                 stdout=subprocess.PIPE)
+        if synthesizer is None:
+            yield 0, None
+            return
+        try:
+            audio, _ = synthesizer.communicate(text.encode("utf-8"), timeout=8)
+        except subprocess.TimeoutExpired:
+            synthesizer.kill()
+            synthesizer.communicate()
+            raise RuntimeError("Speech synthesis timed out.")
+        if cancel.is_set():
+            yield 0, None
+            return
+        if synthesizer.returncode:
+            raise RuntimeError("Speech synthesis failed.")
+        with wave.open(BytesIO(audio), "rb") as wav:
+            yield wav.getframerate(), lambda size: wav.readframes(size // 2)
+
+    def play(self, generation, cancel, text, api_key=None, voice="marin"):
         error = ""
         try:
-            synthesizer = self.spawn(cancel, ["espeak-ng", "--stdin", "--stdout", "-s", "180"],
-                                     stdout=subprocess.PIPE)
-            if synthesizer is None:
-                return
-            try:
-                audio, _ = synthesizer.communicate(text.encode("utf-8"), timeout=8)
-            except subprocess.TimeoutExpired:
-                synthesizer.kill()
-                synthesizer.communicate()
-                raise RuntimeError("Speech synthesis timed out.")
-            if cancel.is_set():
-                return
-            if synthesizer.returncode:
-                raise RuntimeError("Speech synthesis failed.")
-            with wave.open(BytesIO(audio), "rb") as wav:
-                rate = wav.getframerate()
+            with self.audio_source(cancel, text, api_key, voice) as (rate, read):
+                if cancel.is_set():
+                    return
+                size = 2 * (rate // 25)
+                block = read(size)
+                if not block:
+                    raise RuntimeError("The voice returned no audio.")
                 player = self.spawn(cancel, ["pw-play", "--raw", f"--rate={rate}", "--channels=1",
                                              "--format=s16", "--latency=50ms", "-"])
                 if player is None:
                     return
                 try:
-                    start = monotonic()
-                    frames = 0
-                    while not cancel.is_set():
-                        block = wav.readframes(rate // 25)
-                        if not block:
-                            break
-                        # Keep the displayed envelope close to the audible signal.
-                        if cancel.wait(max(0, start + frames / rate - monotonic())):
+                    next_frame = monotonic()
+                    while block and not cancel.is_set():
+                        if cancel.wait(max(0, next_frame - monotonic())):
                             break
                         player.stdin.write(block)
                         player.stdin.flush()
-                        frames += len(block) // 2
                         self.meter.emit(generation, level(block))
+                        next_frame = max(next_frame, monotonic()) + len(block) / (2 * rate)
+                        if cancel.is_set():
+                            break
+                        block = read(size)
                     player.stdin.close()
                     if player.wait(timeout=3) and not cancel.is_set():
                         raise RuntimeError("PipeWire playback failed.")
@@ -99,7 +131,7 @@ class Speaker(QObject):
                         player.wait()
                     if not player.stdin.closed:
                         player.stdin.close()
-        except (OSError, RuntimeError, EOFError, wave.Error, subprocess.TimeoutExpired) as exc:
+        except (OSError, RuntimeError, EOFError, ValueError, HTTPException, wave.Error, subprocess.TimeoutExpired) as exc:
             error = f"Speech output unavailable. {exc}"
         if not cancel.is_set():
             self.finished.emit(generation, error)

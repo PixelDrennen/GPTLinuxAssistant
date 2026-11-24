@@ -19,7 +19,7 @@ cd GPTLinuxAssistant
 /usr/bin/python3 -m assistant_app
 ```
 
-The app launches paused. A configured Vosk model enables the microphone when you select **Start listening**. Window context and editor bridges have separate opt-ins under **Setup**. Use **Pause**, the tray menu, or “Assistant, pause” to clear the in-memory log and revoke pending approvals. The KDE screen-lock signal also pauses collection. Unlocking leaves it paused.
+The app launches paused. A configured Vosk model enables the microphone when you select **Start listening**. Window context and editor bridges have separate opt-ins under **Setup**. Use **Pause**, the tray menu, or “pause” to clear the in-memory log and revoke pending approvals. The KDE screen-lock signal also pauses collection. Unlocking leaves it paused.
 
 ### Window context
 
@@ -48,21 +48,33 @@ Enable **GPT Linux Assistant** in System Settings → Window Management → KWin
 
 ### Work by voice
 
-Select **Start listening** once. Narrate normally to provide context. Start a request or a follow-up answer with “Assistant.”
+Select **Start listening** once. Conversation mode is on by default. Speak your request or answer normally. To think aloud without sending each utterance to the reply model, turn off **Conversation mode** under Setup. In that mode you can still say “Assistant” before a request, pause briefly after the wake word, or click **Ask by voice**.
 
 | Say | What happens |
 | --- | --- |
-| “Assistant, what am I working on?” | Hear the current local task summary. |
-| “Assistant, finish this prompt in Rider.” | Hear what to share if a draft is missing. Sharing a selection within 90 seconds resumes the request automatically. |
-| “Assistant, help me connect this Unity prefab.” | Share a prefab reference from Unity, then review the proposed connection. |
-| “Assistant, write a Slack update about the prefab changes.” | Hear the draft or a clarifying question. Answer by starting with “Assistant.” |
-| “Assistant, copy that.” | Review the proposed clipboard copy. |
-| “Assistant approve” or “Assistant decline” | Respond to the single visible approval preview after the announcement ends. |
-| “Assistant, repeat that” or “Assistant, pause” | Replay the last model reply or stop the session. |
+| “what am I working on?” | Hear the current local task summary. |
+| “finish this prompt in Rider.” | Hear what to share if a draft is missing. Sharing a selection within 90 seconds resumes the request automatically. |
+| “help me connect this Unity prefab.” | Share a prefab reference from Unity, then review the proposed connection. |
+| “write a Slack update about the prefab changes.” | Hear the draft or a clarifying question. Answer the question naturally. |
+| “copy that.” | Review the proposed clipboard copy. |
+| “Approve it” or “Decline it” | Respond to the single visible approval preview after the announcement ends. |
+| “repeat that” or “pause” | Replay the last model reply or stop the session. |
 
-The microphone and assistant meters use microphone audio and the assistant's local playback signal. Transcription uses Vosk, and spoken replies use eSpeak NG through PipeWire. The microphone pauses while the assistant speaks so playback cannot be treated as a request or approval. Wait for the microphone indicator to resume before talking. **Quiet mode** suppresses unsolicited suggestions, and **Speak replies** can mute audio. **Manual controls** exposes text inputs and preview controls when useful.
+The microphone and assistant meters use microphone audio and the assistant's local playback signal. Vosk transcribes locally. OpenAI replies use the Marin voice by default and stream audio through PipeWire as it arrives. Under **Setup**, pick **OpenAI · Cedar** for a different voice, or choose either OpenAI voice alongside local Ollama using `OPENAI_API_KEY`. The fully local voice uses eSpeak NG. The microphone pauses while the assistant speaks so playback cannot be treated as a request or approval. Wait for the microphone indicator to resume before talking. **Quiet mode** suppresses unsolicited suggestions, and **Speak replies** can mute audio. **Manual controls** exposes text inputs and preview controls when useful.
 
-When you choose OpenAI, the request text, selected draft or excerpt, and the previous turn in the same voice workflow can be sent to the API. The separate narration checkbox also allows sending recent narration and focused app identity. Microphone audio stays local, and the app uses the API key from the environment without saving it.
+When you choose an OpenAI voice, the assistant’s spoken text is sent for synthesis. When you choose OpenAI for replies, the request text, selected draft or excerpt, and the previous turn in the same voice workflow can be sent to the API. The separate narration checkbox also allows sending recent narration and focused app identity. Microphone audio stays local, and the app uses the API key from the environment without saving it.
+
+### Look at any shareable window
+
+Install the KDE portal and GStreamer capture packages once:
+
+```bash
+sudo dnf install xdg-desktop-portal-kde gstreamer1 gstreamer1-plugins-good pipewire-gstreamer
+```
+
+Say “Look at this window and explain what’s on screen,” or click **Look at a window**. Choose the app or game in the desktop share picker. The assistant analyzes one frame with the selected vision-capable model, closes capture, and speaks the answer. For a fullscreen game that the picker cannot list as a window, say “Look at my screen” and share the display. This includes everything visible on that display. Availability depends on what the compositor and the game or app allow you to capture.
+
+Choose a vision-capable OpenAI model such as `gpt-4.1-mini`, or a local vision model in Ollama. An OpenAI vision request sends the selected image and question to OpenAI. The app does not save the image, continuously monitor the source, or send input to it. The KWin metadata script is optional for visual questions.
 
 ### Rider
 
