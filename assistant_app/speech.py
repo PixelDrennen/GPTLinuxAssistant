@@ -5,7 +5,7 @@ import re
 import subprocess
 from threading import Event, Lock, Thread
 
-from .transcription import FRAME_BYTES, RATE, SpeechTurn, speech_detector, transcribe
+from .transcription import FRAME_BYTES, RATE, SpeechTurn, openai_sdk, speech_detector, transcribe
 from .voice import level
 
 from PyQt5.QtCore import QObject, pyqtSignal
@@ -62,6 +62,8 @@ class Microphone(QObject):
 
     def read_audio(self, path, generation, cancel, pause_seconds, api_key, vocabulary):
         try:
+            if api_key:
+                openai_sdk()
             recognizer = None
             if path:
                 try:

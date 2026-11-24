@@ -11,6 +11,14 @@ import sys
 from threading import Event, Thread
 from urllib.parse import urlsplit
 
+
+# Use the checkout's dependencies even when launched with an older system-Python command.
+if __name__ == "__main__" and sys.prefix == sys.base_prefix:
+    checkout_python = Path(__file__).resolve().parents[1] / ".venv/bin/python"
+    if checkout_python.is_file() and os.access(checkout_python, os.X_OK):
+        os.execv(str(checkout_python), [str(checkout_python), "-m", "assistant_app", *sys.argv[1:]])
+
+
 from gi.repository import GLib
 from PyQt5.QtCore import QSettings, QTimer, Qt, QUrl, pyqtSignal
 from PyQt5.QtGui import QDesktopServices
@@ -871,6 +879,7 @@ class Window(QMainWindow):
             self.mode = None
             self.user_speaking = False
             self.audio_status = "Microphone unavailable. " + message
+            self.log("Audio", self.audio_status)
 
     def arm(self, action, proposal_id=""):
         if (not self.session.active or not self.mic.isChecked() or

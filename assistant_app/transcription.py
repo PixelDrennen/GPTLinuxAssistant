@@ -1,6 +1,7 @@
 """Collect a complete turn before dispatching speech for transcription."""
 from collections import deque
 from io import BytesIO
+import sys
 import wave
 
 
@@ -60,17 +61,26 @@ def speech_detector():
     return lambda frame, _amount, _active: detector.is_speech(frame, RATE)
 
 
+def openai_sdk():
+    try:
+        from openai import APIError, OpenAI
+    except ModuleNotFoundError as error:
+        if error.name == "openai":
+            raise RuntimeError(f"OpenAI SDK missing from {sys.executable}. "
+                               "Launch with scripts/launch-assistant.sh to use the checkout’s virtual environment.") from None
+        raise RuntimeError(f"OpenAI SDK dependency missing in {sys.executable}: {error}") from None
+    except (ImportError, OSError) as error:
+        raise RuntimeError(f"OpenAI SDK could not load in {sys.executable}: {error}") from None
+    return APIError, OpenAI
+
+
 def transcribe(audio, key, vocabulary=""):
     buffered = BytesIO()
     with wave.open(buffered, "wb") as wav:
         wav.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
         wav.writeframes(audio)
 
-    try:
-        from openai import APIError, OpenAI
-    except ImportError:
-        raise RuntimeError("Install the OpenAI Python SDK to use OpenAI transcription.") from None
-
+    APIError, OpenAI = openai_sdk()
     prompt = "Transcribe the speaker verbatim. Preserve incomplete phrases."
     if vocabulary:
         prompt += " Only use these spellings if heard: " + vocabulary

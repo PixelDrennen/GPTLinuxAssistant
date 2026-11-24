@@ -49,3 +49,18 @@ class TranscriptionTests(unittest.TestCase):
         self.assertEqual(next_task("Let's move past that and do something else."), "")
         self.assertEqual(next_task("Never mind, can you look at my inventory?"), "can you look at my inventory?")
         self.assertIsNone(next_task("Never mind the colors for now."))
+
+    def test_missing_transitive_dependency_reports_the_running_interpreter(self):
+        from assistant_app.transcription import openai_sdk
+        from builtins import __import__ as real_import
+
+        def failing_import(name, *args, **kwargs):
+            if name == "openai":
+                raise ModuleNotFoundError("No module named 'httpx2'", name="httpx2")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=failing_import):
+            with self.assertRaises(RuntimeError) as error:
+                openai_sdk()
+        self.assertIn(sys.executable, str(error.exception))
+        self.assertIn("httpx2", str(error.exception))
