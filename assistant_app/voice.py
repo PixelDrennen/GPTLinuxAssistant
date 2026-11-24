@@ -3,8 +3,10 @@ from array import array
 from contextlib import contextmanager
 from http.client import HTTPException
 from io import BytesIO
+from itertools import chain, islice
 import json
 import math
+from queue import Empty, Full, Queue
 import subprocess
 import sys
 from threading import Event, Lock, Thread
@@ -16,6 +18,11 @@ from urllib.request import Request
 from .ipc import loopback_opener
 
 from PyQt5.QtCore import QObject, pyqtSignal
+
+
+BLOCKS_PER_SECOND = 25
+PREBUFFER_BLOCKS = 8
+QUEUE_BLOCKS = 48
 
 
 def level(pcm):
@@ -96,42 +103,89 @@ class Speaker(QObject):
         with wave.open(BytesIO(audio), "rb") as wav:
             yield wav.getframerate(), lambda size: wav.readframes(size // 2)
 
-    def play(self, generation, cancel, text, api_key=None, voice="marin"):
-        error = ""
+    def fill_buffer(self, pending, stop_buffer, cancel, text, api_key, voice):
+        def put(item):
+            while not (cancel.is_set() or stop_buffer.is_set()):
+                try:
+                    pending.put(item, timeout=0.1)
+                    return True
+                except Full:
+                    pass
+            return False
+
         try:
             with self.audio_source(cancel, text, api_key, voice) as (rate, read):
-                if cancel.is_set():
+                if not rate or not put(rate):
                     return
-                size = 2 * (rate // 25)
-                block = read(size)
-                if not block:
-                    raise RuntimeError("The voice returned no audio.")
-                player = self.spawn(cancel, ["pw-play", "--raw", f"--rate={rate}", "--channels=1",
-                                             "--format=s16", "--latency=50ms", "-"])
-                if player is None:
-                    return
-                try:
-                    next_frame = monotonic()
-                    while block and not cancel.is_set():
-                        if cancel.wait(max(0, next_frame - monotonic())):
-                            break
-                        player.stdin.write(block)
-                        player.stdin.flush()
+                size = 2 * (rate // BLOCKS_PER_SECOND)
+                while not (cancel.is_set() or stop_buffer.is_set()):
+                    block = read(size)
+                    if not block:
+                        break
+                    if len(block) % 2:
+                        raise RuntimeError("The voice returned an incomplete PCM sample.")
+                    if not put(block):
+                        return
+        except (OSError, RuntimeError, EOFError, ValueError, HTTPException, wave.Error) as exc:
+            put(exc)
+        finally:
+            put(None)
+
+    @staticmethod
+    def buffered_items(pending, cancel):
+        while not cancel.is_set():
+            try:
+                item = pending.get(timeout=0.1)
+            except Empty:
+                continue
+            if item is None:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+    def play(self, generation, cancel, text, api_key=None, voice="marin"):
+        error = ""
+        pending = Queue(maxsize=QUEUE_BLOCKS)
+        stop_buffer = Event()
+        Thread(target=self.fill_buffer,
+               args=(pending, stop_buffer, cancel, text, api_key, voice), daemon=True).start()
+        try:
+            items = self.buffered_items(pending, cancel)
+            rate = next(items, None)
+            initial = list(islice(items, PREBUFFER_BLOCKS))
+            if cancel.is_set():
+                return
+            if not initial:
+                raise RuntimeError("The voice returned no audio.")
+            player = self.spawn(cancel, ["pw-play", "--raw", f"--rate={rate}", "--channels=1",
+                                         "--format=s16", "--latency=100ms", "-"])
+            if player is None:
+                return
+            try:
+                next_meter = 0.0
+                for block in chain(initial, items):
+                    if cancel.is_set():
+                        break
+                    # Let PipeWire set the playback pace through pipe backpressure.
+                    player.stdin.write(block)
+                    player.stdin.flush()
+                    now = monotonic()
+                    if now >= next_meter:
                         self.meter.emit(generation, level(block))
-                        next_frame = max(next_frame, monotonic()) + len(block) / (2 * rate)
-                        if cancel.is_set():
-                            break
-                        block = read(size)
+                        next_meter = now + 1 / BLOCKS_PER_SECOND
+                player.stdin.close()
+                if player.wait(timeout=3) and not cancel.is_set():
+                    raise RuntimeError("PipeWire playback failed.")
+            finally:
+                if player.poll() is None:
+                    player.kill()
+                    player.wait()
+                if not player.stdin.closed:
                     player.stdin.close()
-                    if player.wait(timeout=3) and not cancel.is_set():
-                        raise RuntimeError("PipeWire playback failed.")
-                finally:
-                    if player.poll() is None:
-                        player.kill()
-                        player.wait()
-                    if not player.stdin.closed:
-                        player.stdin.close()
         except (OSError, RuntimeError, EOFError, ValueError, HTTPException, wave.Error, subprocess.TimeoutExpired) as exc:
             error = f"Speech output unavailable. {exc}"
+        finally:
+            stop_buffer.set()
         if not cancel.is_set():
             self.finished.emit(generation, error)
