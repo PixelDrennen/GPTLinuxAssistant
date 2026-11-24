@@ -62,3 +62,14 @@ class DraftingTests(unittest.TestCase):
         opener.return_value.open.side_effect = URLError(ConnectionRefusedError(errno.ECONNREFUSED, "refused"))
         with self.assertRaisesRegex(ValueError, "Ollama is offline"):
             complete("gemma4", "", "hello", {}, "general")
+
+    @patch("assistant_app.drafting.loopback_opener")
+    def test_visual_watch_requires_a_frame_and_an_explicit_schema_result(self, opener):
+        response = json.dumps({"draft": "Open the TSM ledger.", "question": "", "wait_for_view": True})
+        opener.return_value.open.return_value = io.BytesIO(json.dumps({"response": response}).encode())
+        reply = complete("local-vision", "", "Read my TSM ledger", {}, "general", image=b"frame",
+                         may_wait=True, rechecking=True)
+        request = json.loads(opener.return_value.open.call_args.args[0].data)
+        self.assertIn("wait_for_view", request["format"]["required"])
+        self.assertIn("silent follow-up check", request["system"])
+        self.assertTrue(reply.wait_for_view)

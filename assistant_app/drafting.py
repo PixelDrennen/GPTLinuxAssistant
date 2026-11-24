@@ -15,9 +15,10 @@ class DraftResult:
     draft: str
     question: str
     needs_view: bool = False
+    wait_for_view: bool = False
 
 
-def complete(model, draft, request, context, workflow, *, api_key=None, image=None, may_view=False):
+def complete(model, draft, request, context, workflow, *, api_key=None, image=None, may_view=False, may_wait=False, rechecking=False):
     if not re.fullmatch(r"[a-zA-Z0-9_./:-]{1,100}", model):
         raise ValueError("Enter a valid model name.")
     tag = model.rsplit(":", 1)[-1].casefold()
@@ -54,6 +55,17 @@ def complete(model, draft, request, context, workflow, *, api_key=None, image=No
         prompt["system"] += (" Set needs_view=true only if the user asks about the visible contents of their "
                              "monitor or identifying UI details requires a fresh screenshot. When true, leave "
                              "draft and question empty. For every other request set needs_view=false.")
+    if may_wait and image is not None:
+        prompt["format"]["properties"]["wait_for_view"] = {"type": "boolean"}
+        prompt["format"]["required"].append("wait_for_view")
+        prompt["system"] += (
+            " Set wait_for_view=true only when the user's requested app, panel, or on-screen state is "
+            "not yet visible but the user can make it visible. In draft, briefly ask the user to "
+            "open or reveal that specific target. Leave question empty. When the requested target "
+            "is visible, set wait_for_view=false and answer the user's original task using the screenshot."
+        )
+        if rechecking:
+            prompt["system"] += " This is a silent follow-up check. Keep waiting if the requested target is still absent."
     if image is not None:
         frames = (image,) if isinstance(image, bytes) else image
         encoded = [b64encode(frame).decode("ascii") for frame in frames]
@@ -106,6 +118,8 @@ def complete(model, draft, request, context, workflow, *, api_key=None, image=No
     draft, question = parsed["draft"].strip(), parsed["question"].strip()
     if may_view and image is None and parsed.get("needs_view") is True and not draft and not question:
         return DraftResult("", "", True)
+    if may_wait and image is not None and parsed.get("wait_for_view") is True and draft and not question:
+        return DraftResult(draft[:400], "", wait_for_view=True)
     if bool(draft) == bool(question) or len(draft) > 24000 or len(question) > 300:
         raise ValueError("The model did not return one usable draft or question.")
     return DraftResult(draft, question)

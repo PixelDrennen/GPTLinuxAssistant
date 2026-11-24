@@ -33,7 +33,7 @@ Enable **GPT Linux Assistant** in System Settings → Window Management → KWin
 
 ### Set up voice once
 
-1. Create a virtual environment with `/usr/bin/python3 -m venv --system-site-packages .venv` and run `.venv/bin/python -m pip install vosk`.
+1. Create a virtual environment with `/usr/bin/python3 -m venv --system-site-packages .venv` and run `.venv/bin/python -m pip install vosk webrtcvad-wheels`. WebRTC VAD helps separate speech from background sound. For optional OpenAI transcription, also run `.venv/bin/python -m pip install openai`.
 2. Download and extract a small English model from the [Vosk model catalog](https://alphacephei.com/vosk/models). Put the extracted model directory at `~/.local/share/gpt-linux-assistant/vosk-model`, or pass its path with `--vosk-model`.
 3. Choose a model for conversation and drafting.
 
@@ -42,6 +42,8 @@ Enable **GPT Linux Assistant** in System Settings → Window Management → KWin
    - **Local Ollama.** Run [Ollama](https://ollama.com/) with a downloaded local model and cloud features disabled (`OLLAMA_NO_CLOUD=1` in the Ollama server environment). Launch with `.venv/bin/python -m assistant_app --ollama-model YOUR_MODEL`.
 
 ### Work by voice
+
+The microphone waits four seconds after speech before submitting a turn. Adjust **Wait after speech** in Settings if you need more thinking time. For clearer transcripts, enable **OpenAI transcription** in Settings and use your existing API key. This sends the completed utterance to OpenAI for transcription. Vosk remains the offline option. The optional **Recognition vocabulary** field can include terms such as TradeSkillMaster, TSM, and character names. Keep a local Vosk model configured if you approve actions by voice, so the app can corroborate approval phrases locally.
 
 Select **Start listening** once. Conversation mode is on by default. Speak your request or answer normally. To think aloud without sending each utterance to the reply model, turn off **Conversation mode** under Setup. In that mode you can still say “Assistant” before a request, pause briefly after the wake word, or click **Ask by voice**.
 
@@ -57,7 +59,7 @@ Select **Start listening** once. Conversation mode is on by default. Speak your 
 
 The microphone and assistant meters use microphone audio and the assistant's local playback signal. Vosk transcribes locally. OpenAI replies use the Marin voice by default and stream audio through PipeWire as it arrives. Under **Setup**, pick **OpenAI · Cedar** for a different voice, or choose either OpenAI voice alongside local Ollama using `OPENAI_API_KEY`. The fully local voice uses eSpeak NG. The microphone pauses while the assistant speaks so playback cannot be treated as a request or approval. Wait for the microphone indicator to resume before talking. **Quiet mode** suppresses unsolicited suggestions, and **Speak replies** can mute audio. **⋯ → Manual request** opens text inputs and preview controls when useful.
 
-When you choose an OpenAI voice, the assistant’s spoken text is sent for synthesis. When you choose OpenAI for replies, the request text, selected draft or excerpt, and up to four recent turns from the current chat and workflow can be sent to the API. By default, active session narration and focused app identity can be sent too. Turn off that scope in **Setup**. Microphone audio stays local, and the API key is stored separately in the desktop wallet.
+When you choose an OpenAI voice, the assistant’s spoken text is sent for synthesis. When you choose OpenAI for replies, the request text, selected draft or excerpt, and up to four recent turns from the current chat and workflow can be sent to the API. By default, active session narration and focused app identity can be sent too. Turn off that scope in **Setup**. Microphone audio stays local unless you enable OpenAI transcription. The API key is stored separately in the desktop wallet.
 
 ### Look at any shareable window
 
@@ -70,6 +72,8 @@ sudo dnf install xdg-desktop-portal-kde gstreamer1 gstreamer1-plugins-good pipew
 Say “Look at this window and explain what’s on screen,” or choose **⋯ → Screen sharing → View a window**. Choose the app or game in the desktop share picker. The assistant analyzes one frame and closes the window capture.
 
 Use **⋯ → Screen sharing → View monitors** or say “Look at my screen” for fullscreen games or anything spanning multiple apps. Choose the displays you want to share. When an ordinary question needs visual context, the assistant can open the picker itself. It can then take fresh frames from the approved displays when needed for the rest of the listening session. The picker and capture availability depend on the compositor. Select **Stop monitor sharing**, say “Stop sharing,” or pause to revoke display access. Switching chats or profiles also revokes access.
+
+If the requested panel is missing from shared monitors, the assistant can ask you to open it and check again every five seconds. Say “it’s open now” to check right away, “stop watching” to end rechecks, or “never mind” to drop the current task. You can continue with a new task in the same sentence. The completed and canceled tasks stay in chat history.
 
 Choose a vision-capable OpenAI model such as `gpt-4.1-mini`, or a local vision model in Ollama. An OpenAI vision request sends the requested frames and question to OpenAI. Frames are kept in memory for the request and omitted from chat history. The KWin metadata script is optional for visual questions.
 

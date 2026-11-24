@@ -15,6 +15,7 @@ class Chat:
     title: str = "New chat"
     entries: list = field(default_factory=list)
     turns: list = field(default_factory=list)
+    task_start: int = 0
 
 
 class ChatStore:
@@ -37,13 +38,13 @@ class ChatStore:
             raise ValueError("This chat is no longer available.")
         title, archived, payload = row
         contents = json.loads(zlib.decompress(payload) if archived else payload)
-        return Chat(chat_id, title, contents["entries"], contents["turns"])
+        return Chat(chat_id, title, contents["entries"], contents["turns"], contents.get("task_start", 0))
 
     def index(self):
         return self.db.execute("SELECT id, title, updated FROM chats ORDER BY archived, updated DESC, rowid DESC").fetchall()
 
     def write(self, chat, archive):
-        data = json.dumps({"entries": chat.entries, "turns": chat.turns}, ensure_ascii=False).encode()
+        data = json.dumps({"entries": chat.entries, "turns": chat.turns, "task_start": chat.task_start}, ensure_ascii=False).encode()
         payload = zlib.compress(data, level=6) if archive else data
         self.db.execute("""INSERT INTO chats VALUES (?, ?, ?, ?, ?)
                         ON CONFLICT(id) DO UPDATE SET title=excluded.title,

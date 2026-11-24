@@ -16,7 +16,7 @@ from PyQt5.QtCore import QSettings, QTimer, Qt, QUrl, pyqtSignal
 from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QStyle, QSystemTrayIcon, QToolButton,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QStyle, QSystemTrayIcon, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -29,6 +29,7 @@ from .live import VoiceMeter
 from .session import Session
 from .speech import Microphone
 from .theme import STYLE
+from .tasks import next_task
 from . import credentials, updates
 from .voice import Speaker
 from .window_view import CaptureCanceled, MONITOR, WINDOW, capture_frame, select_source
@@ -69,6 +70,9 @@ class Window(QMainWindow):
         self.audio.ready.connect(self.audio_ready)
         self.audio.heard.connect(self.heard)
         self.audio.failed.connect(self.audio_failed)
+        self.audio.speech_started.connect(self.audio_speech_started)
+        self.audio.decoding.connect(self.audio_decoding)
+        self.audio.transcription_failed.connect(self.audio_transcription_failed)
         self.audio.meter.connect(self.mic_sample)
         self.audio.partial.connect(self.mic_partial)
         self.speaker = Speaker()
@@ -84,6 +88,10 @@ class Window(QMainWindow):
         self.drafted.connect(self.draft_finished)
         self.viewed.connect(self.view_finished)
         self.view_job = None
+        self.watch_request = None
+        self.watch_timer = QTimer(self)
+        self.watch_timer.setInterval(5000)
+        self.watch_timer.timeout.connect(self.check_watch)
         self.shared_monitor = None
         self.monitor_selected.connect(self.on_monitor_selected)
         self.mode = None
@@ -92,6 +100,7 @@ class Window(QMainWindow):
         self.hint_seen = -float("inf")
         self.last_tray_state = None
         self.audio_status = ""
+        self.user_speaking = False
         self.partial_text = ""
         self.setWindowTitle("GPT Linux Assistant")
         self.setStyleSheet(STYLE)
@@ -157,6 +166,8 @@ class Window(QMainWindow):
         self.monitor_button = share.addAction("View monitors", lambda: self.look_at_window(source=MONITOR))
         self.stop_monitor_button = share.addAction("Stop monitor sharing", self.stop_monitor)
         self.stop_monitor_button.setVisible(False)
+        self.stop_watch_button = share.addAction("Stop screen watch", self.stop_watch)
+        self.stop_watch_button.setVisible(False)
         self.offer = self.controls.addAction("Review suggestion", self.follow_suggestion)
         self.offer.setVisible(False)
         self.controls.addSeparator()
@@ -181,7 +192,7 @@ class Window(QMainWindow):
         stack.addWidget(self.journal, 1)
         self.settings = self.popup("Settings", 580, 520)
         form = QFormLayout(self.settings)
-        self.mic = QCheckBox("Use microphone (Vosk)")
+        self.mic = QCheckBox("Use microphone")
         default_path = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "gpt-linux-assistant/vosk-model"
         mic_path = args.vosk_model or (str(default_path) if default_path.is_dir() else "")
         self.mic_path = QLineEdit(mic_path)
@@ -190,6 +201,17 @@ class Window(QMainWindow):
         self.mic.toggled.connect(self.refresh_audio)
         self.mic_path.editingFinished.connect(self.refresh_audio)
         form.addRow(self.mic, self.mic_path)
+        self.cloud_transcription = QCheckBox("OpenAI transcription · sends completed utterances")
+        form.addRow(self.cloud_transcription)
+        self.thinking_pause = QSpinBox()
+        self.thinking_pause.setRange(2, 8)
+        self.thinking_pause.setValue(4)
+        self.thinking_pause.setSuffix(" seconds")
+        form.addRow("Wait after speech", self.thinking_pause)
+        self.vocabulary = QLineEdit()
+        self.vocabulary.setPlaceholderText("Names and terms, e.g. TradeSkillMaster, TSM, Hanami")
+        self.vocabulary.setMaxLength(320)
+        form.addRow("Recognition vocabulary", self.vocabulary)
         self.spoken = QCheckBox("Speak replies")
         self.spoken.setChecked(True)
         self.spoken.toggled.connect(self.speech_setting)
@@ -232,6 +254,9 @@ class Window(QMainWindow):
         self.cloud_notice = self.label("")
         form.addRow(self.cloud_notice)
         self.voice_choice.currentIndexChanged.connect(self.update_cloud_notice)
+        self.cloud_transcription.toggled.connect(self.transcription_settings_changed)
+        self.thinking_pause.valueChanged.connect(self.refresh_audio)
+        self.vocabulary.editingFinished.connect(self.refresh_audio)
         self.update_cloud_notice()
         self.window_access = QCheckBox("Use KWin app identities")
         self.window_access.toggled.connect(self.set_windows)
@@ -425,6 +450,8 @@ class Window(QMainWindow):
             if explicit or (no_provider and not self.cli_provider):
                 self.provider.setCurrentIndex(self.provider.findData("openai"))
                 self.save_profile()
+            if self.session.active and self.cloud_transcription.isChecked():
+                self.refresh_audio()
         else:
             self.key_status.setText(error or "No OpenAI API key saved.")
 
@@ -486,6 +513,7 @@ class Window(QMainWindow):
         self.mode = None
         self.model_job = None
         self.audio_status = ""
+        self.user_speaking = False
         self.last_status = ""
         self.last_focus = ""
         self.mic_meter.clear()
@@ -543,7 +571,9 @@ class Window(QMainWindow):
                          "OpenAI receives request text and any shared draft or excerpt used in the request.")
         if self.cloud_voice():
             notes.append("The OpenAI voice sends the assistant’s spoken text for synthesis.")
-        if notes:
+        if self.cloud_transcription.isChecked():
+            notes.append("Completed utterance audio and vocabulary are sent to OpenAI for transcription.")
+        elif notes:
             notes.append("Microphone audio stays local.")
         self.cloud_notice.setText(" ".join(notes))
         self.cloud_notice.setVisible(bool(notes))
@@ -556,6 +586,8 @@ class Window(QMainWindow):
         values = {**self.models, "provider": self.current_provider,
                   "microphonePath": self.mic_path.text(), "excluded": self.exclude.text(),
                   "voice": self.voice_choice.currentData()}
+        values.update(transcribeOnline=self.cloud_transcription.isChecked(),
+                      thinkingPause=self.thinking_pause.value(), vocabulary=self.vocabulary.text())
         values.update({key: box.isChecked() for key, box in self.profile_boxes.items()})
         for key, value in values.items():
             self.profile_settings.setValue(prefix + key, value)
@@ -569,6 +601,9 @@ class Window(QMainWindow):
         self.mic_path.setText(self.profile_settings.value(prefix + "microphonePath",
                                                           self.profile_defaults["microphonePath"]))
         self.exclude.setText(self.profile_settings.value(prefix + "excluded", ""))
+        self.cloud_transcription.setChecked(self.profile_settings.value(prefix + "transcribeOnline", False, type=bool))
+        self.thinking_pause.setValue(self.profile_settings.value(prefix + "thinkingPause", 4, type=int))
+        self.vocabulary.setText(self.profile_settings.value(prefix + "vocabulary", ""))
         provider = self.profile_settings.value(prefix + "provider", self.profile_defaults["provider"])
         index = self.provider.findData(provider)
         self.provider.setCurrentIndex(max(0, index))
@@ -679,7 +714,7 @@ class Window(QMainWindow):
             if chat_id == chat.id:
                 self.chat_list.setCurrentItem(item)
         self.chat_list.blockSignals(False)
-        self.last_reply = chat.turns[-1][2] if chat.turns else ""
+        self.last_reply = chat.turns[-1][2] if len(chat.turns) > chat.task_start else ""
 
     def change_chat(self, chat_id=None):
         if chat_id == self.history.chat.id:
@@ -780,6 +815,17 @@ class Window(QMainWindow):
         self.audio_status = "Preparing speech · microphone paused"
         self.speaker.start(text[:420], api_key=api_key, voice=voice or "marin")
 
+    def transcription_settings_changed(self, enabled):
+        if enabled:
+            self.mic.setChecked(True)
+        self.update_cloud_notice()
+        self.refresh_audio()
+
+    def start_microphone(self):
+        self.audio.start(self.mic_path.text().strip(), self.thinking_pause.value(),
+                         self.api_key if self.cloud_transcription.isChecked() else None,
+                         self.vocabulary.text().strip())
+
     def refresh_audio(self):
         if self.speaking:
             return
@@ -787,34 +833,57 @@ class Window(QMainWindow):
         self.voice_approval = None
         self.mode = None
         path = self.mic_path.text().strip()
+        self.user_speaking = False
         if not self.session.active or not self.mic.isChecked():
             self.audio_status = ""
-        elif not path:
+        elif self.cloud_transcription.isChecked() and not self.api_key:
+            self.audio_status = "Save your OpenAI API key to use OpenAI transcription."
+        elif not path and not self.cloud_transcription.isChecked():
             self.audio_status = "Set the Vosk model path to use the microphone."
         else:
             self.audio_status = "Starting microphone"
-            self.audio.start(path)
+            self.start_microphone()
 
     def audio_ready(self, generation):
-        if generation == self.audio.generation and self.mode is None:
+        if generation == self.audio.generation:
+            self.user_speaking = False
+            if self.mode is None:
+                self.audio_status = "Microphone listening"
+
+    def audio_speech_started(self, generation):
+        if generation == self.audio.generation:
+            self.user_speaking = True
+            if self.view_job and self.view_job[5]:
+                self.cancel_view()
+
+    def audio_decoding(self, generation):
+        if generation == self.audio.generation:
+            self.audio_status = "Transcribing speech"
+
+    def audio_transcription_failed(self, generation, message):
+        if generation == self.audio.generation and self.session.active:
+            self.user_speaking = False
             self.audio_status = "Microphone listening"
+            self.log("Audio", message)
 
     def audio_failed(self, generation, message):
         if generation == self.audio.generation:
             self.mode = None
+            self.user_speaking = False
             self.audio_status = "Microphone unavailable. " + message
 
     def arm(self, action, proposal_id=""):
-        if not self.session.active or not self.mic.isChecked() or not self.mic_path.text().strip():
+        if (not self.session.active or not self.mic.isChecked() or
+                (not self.api_key if self.cloud_transcription.isChecked() else not self.mic_path.text().strip())):
             self.message("Start listening and enable the microphone first.")
             return
         if self.speaking:
             self.speaker.stop()
             self.speaking = False
             self.ai_meter.clear()
-        self.audio.start(self.mic_path.text().strip())
+        self.start_microphone()
         self.voice_approval = None
-        self.mode = (action, proposal_id, self.session.clock() + 12)
+        self.mode = (action, proposal_id, self.session.clock() + (75 if action == "ask" else 20))
         self.audio_status = "Say your request." if action == "ask" else "Say yes or no to this proposal."
 
     def ask_voice(self):
@@ -832,6 +901,7 @@ class Window(QMainWindow):
     def heard(self, generation, text, confidence):
         if not self.session.active or self.speaking or generation != self.audio.generation:
             return
+        self.user_speaking = False
         self.audio_status = "Microphone listening"
         words = " ".join(re.findall(r"[a-z0-9]+", text.casefold()))
         if not words:
@@ -893,6 +963,10 @@ class Window(QMainWindow):
         if voice and words in ("pause", "stop listening", "pause listening"):
             self.pause()
             return
+        if voice and words in ("stop watching", "stop the watch", "stop checking"):
+            self.stop_watch()
+            self.say("I stopped checking the screen.")
+            return
         if voice and words in ("stop sharing", "stop screen sharing", "stop monitor sharing"):
             self.stop_monitor()
             self.say("Screen sharing stopped.")
@@ -902,6 +976,20 @@ class Window(QMainWindow):
             return
         if not self.session.active:
             self.message("Start listening before making a request.")
+            return
+        follow_up = next_task(request) if voice else None
+        if follow_up is not None:
+            self.discard_task()
+            if follow_up:
+                self.ask(voice_request=follow_up)
+            else:
+                self.say("Okay. What would you like to do next?")
+            return
+        if self.view_job and self.view_job[5]:
+            self.cancel_view()
+        if voice and self.watch_request and words in ("it is open", "it s open", "it s open now", "it is open now",
+                                                      "check again", "take another look", "look again"):
+            self.check_watch()
             return
         with self.session.lock:
             self.session.expire()
@@ -928,13 +1016,6 @@ class Window(QMainWindow):
             return
         if voice and words in ("review suggestion", "take the suggestion"):
             self.follow_suggestion()
-            return
-        if voice and words in ("cancel", "cancel request"):
-            self.clarification = None
-            self.waiting_for_share = None
-            self.model_job = None
-            self.cancel_view()
-            self.say("Request canceled.")
             return
         visual = re.match(r"^(?:please |can you |could you )?look at (?:this |the |my |a )?(window|screen|game)\b", request, re.IGNORECASE)
         if visual:
@@ -1000,7 +1081,9 @@ class Window(QMainWindow):
         context = {"profile": self.profile}
         if self.include_narration.isChecked():
             context.update(narration=narration[-5:], focused_app=focus)
-        history = [turn[1:] for turn in self.history.chat.turns[-16:] if turn[0] == kind][-4:]
+        chat = self.history.chat
+        recent = chat.turns[max(chat.task_start, len(chat.turns) - 16):]
+        history = [turn[1:] for turn in recent if turn[0] == kind][-4:]
         if history:
             context["previous_turns"] = [[request[:1200], reply[:1600]] for request, reply in history]
         job = (epoch, kind, target, self.output.toPlainText(), self.request.text(),
@@ -1024,7 +1107,47 @@ class Window(QMainWindow):
             self.view_job[0].set()
             self.view_job = None
 
+    def discard_task(self):
+        self.stop_watch()
+        self.cancel_view()
+        self.model_job = None
+        self.clarification = None
+        self.waiting_for_share = None
+        self.last_reply = ""
+        self.output.clear()
+        self.input.clear()
+        self.request.clear()
+        self.url.clear()
+        chat = self.history.chat
+        chat.task_start = len(chat.turns)
+        with self.session.lock:
+            self.session.events.clear()
+            self.session.suggestion = ""
+            self.session.targets.clear()
+            self.session.proposal = None
+            if self.session.command and not self.session.command["claimed"]:
+                self.session.command = None
+            self.session.status = "Listening"
+        self.log("Task", "Ready for a new task.")
+        self.render()
+
+    def stop_watch(self):
+        self.watch_request = None
+        self.watch_timer.stop()
+        self.stop_watch_button.setVisible(False)
+        if self.view_job and self.view_job[5]:
+            self.cancel_view()
+
+    def check_watch(self):
+        if not self.watch_request or not self.session.active or not self.shared_monitor:
+            self.stop_watch()
+        elif not (self.speaking or self.model_job or self.view_job or self.mode
+                  or self.session.proposal or self.session.command or self.user_speaking
+                  or self.audio_status == "Transcribing speech"):
+            self.look_at_window(self.watch_request, MONITOR, rechecking=True)
+
     def stop_monitor(self):
+        self.stop_watch()
         self.cancel_view()
         if self.shared_monitor is not None:
             self.shared_monitor.close()
@@ -1040,7 +1163,9 @@ class Window(QMainWindow):
         else:
             monitor.close()
 
-    def look_at_window(self, request=None, source=WINDOW):
+    def look_at_window(self, request=None, source=WINDOW, *, rechecking=False):
+        if not rechecking:
+            self.stop_watch()
         if not self.session.active:
             self.message("Start listening before sharing a window.")
             return
@@ -1063,17 +1188,19 @@ class Window(QMainWindow):
             request = self.request.text().strip() or "Briefly describe what is visible and how you could help."
         target = "screen" if source == MONITOR else "window"
         destination = "OpenAI" if cloud else "the local model"
-        self.waiting_for_share = None
-        self.clarification = None
+        if not rechecking:
+            self.waiting_for_share = None
+            self.clarification = None
         shared = self.shared_monitor if source == MONITOR else None
         if shared is not None:
-            self.message(f"Sharing fresh frames from the selected monitors with {destination}.")
+            if not rechecking:
+                self.message(f"Sharing fresh frames from the selected monitors with {destination}.")
         elif source == MONITOR:
             self.message(f"Choose monitors for this session. Requested frames go to {destination}.")
         else:
             self.message(f"Choose a {target} to share one frame with {destination}.")
         profile = self.profile
-        job = (Event(), self.session.epoch, model, request, source)
+        job = (Event(), self.session.epoch, model, request, source, rechecking)
         self.view_job = job
         cancel = job[0]
 
@@ -1088,7 +1215,8 @@ class Window(QMainWindow):
                     frame = capture_frame(source, cancel)
                 if cancel.is_set():
                     return
-                result = complete(model, "", request, {"profile": profile}, "general", api_key=api_key, image=frame)
+                result = complete(model, "", request, {"profile": profile}, "general", api_key=api_key, image=frame,
+                                  may_wait=source == MONITOR, rechecking=rechecking)
                 self.viewed.emit(job, result, "")
             except CaptureCanceled:
                 self.viewed.emit(job, None, "")
@@ -1109,10 +1237,20 @@ class Window(QMainWindow):
             self.message("Window view failed. " + error)
             self.say("I couldn't view that source. Check the activity log for details.")
         elif result is None:
+            self.stop_watch()
             self.message("Window sharing canceled.")
+        elif result.wait_for_view and self.shared_monitor:
+            if not job[5]:
+                self.watch_request = job[3]
+                self.watch_timer.start()
+                self.stop_watch_button.setVisible(True)
+                self.log("Screen", "Waiting for the requested view. Say stop watching to end the checks.")
+                self.answer(result.draft + " I’ll check again when it’s open.", True)
         elif result.question:
+            self.stop_watch()
             self.answer(result.question, True)
         else:
+            self.stop_watch()
             self.last_reply = result.draft
             self.remember_turn("general", job[3], result.draft)
             self.output.setPlainText(result.draft)
@@ -1265,7 +1403,8 @@ class Window(QMainWindow):
             suggestion = session.suggestion if not self.quiet.isChecked() else ""
             targets = dict(session.targets)
             hint_time = session.last_hint
-        self.state.setText("Listening" if active else "Paused")
+        self.state.setText("Transcribing" if active and self.audio_status == "Transcribing speech"
+                           else "Listening" if active else "Paused")
         if active != self.last_tray_state:
             self.listen_button.setText("■" if active else "▶")
             label = "Pause listening" if active else "Start listening"
@@ -1309,12 +1448,14 @@ class Window(QMainWindow):
                 if self.tray.isVisible() and not self.isVisible():
                     self.tray.showMessage(title, message)
                 self.log("Suggestion", message)
-                if not self.speaking and not self.model_job and not self.view_job and not proposal:
+                if not self.speaking and not self.user_speaking and not self.model_job and not self.view_job and not proposal:
                     command = "review suggestion" if self.conversation.isChecked() else "Assistant, review suggestion"
                     self.say(f"{message} Say {command}.", record=False)
         proposal_id = proposal.id if proposal else None
         if self.mode and (self.mode[2] < session.clock() or (self.mode[0] == "reply" and self.mode[1] != proposal_id)):
-            self.refresh_audio()
+            self.mode = None
+            if not self.speaking:
+                self.audio_status = "Microphone listening"
         if proposal_id != self.previewed:
             self.voice_approval = None
             self.previewed = proposal_id

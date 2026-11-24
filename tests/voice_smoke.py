@@ -91,6 +91,36 @@ def main():
         hear("stop sharing")
         monitor.close.assert_called_once()
         assert not window.stop_monitor_button.isVisible()
+    monitor = Mock()
+    monitor.frame.return_value = b"game"
+    pending_ledger = DraftResult("Open the TradeSkillMaster ledger.", "", wait_for_view=True)
+    with patch("assistant_app.__main__.select_source", return_value=monitor), \
+            patch("assistant_app.__main__.complete", side_effect=[
+                DraftResult("", "", True), pending_ledger, pending_ledger, DraftResult("Ledger total: 562,604 gold.", ""),
+            ]):
+        hear("Can you read my TSM ledger?")
+        settle()
+        assert window.stop_watch_button.isVisible()
+        window.check_watch()
+        settle()
+        assert window.journal.toPlainText().count("Open the TradeSkillMaster ledger.") == 1
+        hear("It's open now")
+        settle()
+        assert window.last_reply == "Ledger total: 562,604 gold."
+        assert not window.stop_watch_button.isVisible()
+
+    with patch("assistant_app.__main__.complete", side_effect=[
+            DraftResult("", "", True), pending_ledger, DraftResult("Starting a new topic.", ""),
+    ]) as model:
+        hear("Can you read my TSM ledger again?")
+        settle()
+        assert window.watch_request
+        hear("Never mind, can you explain inventory slots?")
+        settle()
+        assert not window.watch_request
+        assert model.call_args.args[2] == "can you explain inventory slots?"
+        assert "previous_turns" not in model.call_args.args[3]
+        assert "Ledger total: 562,604 gold." in window.journal.toPlainText()
     window.last_reply = "A game inventory."
 
     window.mic_path.setText("simulated-model")
@@ -124,7 +154,7 @@ def main():
     assert "A game inventory." not in window.journal.toPlainText()
     window.change_chat(work_chat)
     assert "A game inventory." in window.journal.toPlainText()
-    assert window.last_reply == "Same two monitors."
+    assert window.last_reply == "Starting a new topic."
     window.model.setText("work-model")
     window.profile_picker.setCurrentIndex(window.profile_picker.findData("play"))
     assert window.model.text() != "work-model"
@@ -183,10 +213,9 @@ def main():
     restarted.log("Assistant", "Resume following new messages.")
     settle()
     assert bar.value() == bar.maximum()
+    old_chat = restarted.history.chat.id
     restarted.new_chat()
     assert "Saved message" not in restarted.journal.toPlainText()
-    old_chat = next(chat_id for chat_id, _, _ in restarted.history.index()
-                    if chat_id != restarted.history.chat.id)
     restarted.change_chat(old_chat)
     settle()
     assert bar.maximum() > 0 and bar.value() == bar.maximum()
