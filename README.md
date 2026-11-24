@@ -75,7 +75,15 @@ Use **⋯ → Screen sharing → View monitors** or say “Look at my screen” 
 
 If the requested panel is missing from shared monitors, the assistant can ask you to open it and check again every five seconds. Say “it’s open now” to check right away, “stop watching” to end rechecks, or “never mind” to drop the current task. You can continue with a new task in the same sentence. The completed and canceled tasks stay in chat history.
 
-Choose a vision-capable OpenAI model such as `gpt-4.1-mini`, or a local vision model in Ollama. An OpenAI vision request sends the requested frames and question to OpenAI. Frames are kept in memory for the request and omitted from chat history. The KWin metadata script is optional for visual questions.
+Choose a vision-capable OpenAI model such as `gpt-4.1-mini`, or a local vision model in Ollama. An OpenAI vision request sends the requested frames and question to OpenAI. The chat saves a clickable local preview of the frames sent to the model, resized to at most 1440 × 1000. The KWin metadata script is optional for visual questions.
+
+### Desktop control
+
+While listening, say “Use my computer to click the Accounting tab in TradeSkillMaster,” or open **⋯ → Desktop control → Start task**. Select one monitor and grant keyboard and pointer access in KDE’s Remote Desktop prompt. Desktop control uses the OpenAI computer-use tool and sends screenshots to OpenAI, independently of the text reply provider.
+
+Each step shows the selected display and the proposed input. Review it and click **Send this input**. You can approve clicks, scrolls, drags, shortcuts, or typed text. Keyboard input needs an approved click on the intended field first. If the target area changes while you’re reviewing, the input is skipped. Say “stop desktop control,” use the tray stop action, or pause to close the session.
+
+When the assistant speaks, a small movable overlay shows the spoken line and pulses with the voice level. Drag it by its body. Wayland window placement is managed by the compositor.
 
 ### Chats and profiles
 
@@ -106,7 +114,7 @@ Pick the workflow under **App** and paste the relevant excerpt under **Shared co
 
 ## Permission model
 
-The active session keeps app observations, shared editor targets, and monitor frames in memory. Chat transcript, replies, and activity text are saved in the selected profile. The microphone and KWin sources are separate switches. KWin publishes window metadata only when the assistant has opted in during an active session. Editor bridges publish a selected target only after an explicit share. The same-user bridges use an authenticated loopback endpoint with a private runtime credential. An approved edit is single-use and expires if the editor fails to claim it. If an edit has already been handed to the editor, inspect the reported outcome and use the editor's undo command if needed.
+The active session keeps app observations, shared editor targets, and full-resolution monitor frames in memory. Chat transcript, replies, and activity text are saved in the selected profile. The microphone and KWin sources are separate switches. KWin publishes window metadata only when the assistant has opted in during an active session. Editor bridges publish a selected target only after an explicit share. The same-user bridges use an authenticated loopback endpoint with a private runtime credential. An approved edit is single-use and expires if the editor fails to claim it. If an edit has already been handed to the editor, inspect the reported outcome and use the editor's undo command if needed.
 
 The broker exposes no shell or generic input control. Ollama receives text and returns draft text, with no assistant tools or credentials. A local process running as the same Linux user remains inside the system's normal user trust boundary.
 

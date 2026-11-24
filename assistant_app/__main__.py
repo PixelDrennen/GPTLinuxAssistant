@@ -21,21 +21,23 @@ if __name__ == "__main__" and sys.prefix == sys.base_prefix:
 
 from gi.repository import GLib
 from PyQt5.QtCore import QSettings, QTimer, Qt, QUrl, pyqtSignal
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtGui import QDesktopServices, QPixmap
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QStyle, QSystemTrayIcon, QToolButton,
     QVBoxLayout, QWidget,
 )
 
 from .chats import ChatStore
 from .desktop import Desktop
+from .desktop_control import DesktopControl
 from .drafting import complete
 from .ipc import LocalBridge
 from .journal import ChatJournal
 from .live import VoiceMeter
 from .session import Session
 from .speech import Microphone
+from .speech_overlay import SpeechOverlay
 from .theme import STYLE
 from .tasks import next_task
 from . import credentials, updates
@@ -46,6 +48,7 @@ from .window_view import CaptureCanceled, MONITOR, WINDOW, capture_frame, select
 class Window(QMainWindow):
     drafted = pyqtSignal(object, object, str)
     viewed = pyqtSignal(object, object, str)
+    view_captured = pyqtSignal(object, object)
     monitor_selected = pyqtSignal(object, object)
     update_checked = pyqtSignal(object, str, bool)
     update_installed = pyqtSignal(str)
@@ -84,6 +87,8 @@ class Window(QMainWindow):
         self.audio.meter.connect(self.mic_sample)
         self.audio.partial.connect(self.mic_partial)
         self.speaker = Speaker()
+        self.speech_overlay = SpeechOverlay()
+        self.spoken_text = ""
         self.speaker.meter.connect(self.speaker_sample)
         self.speaker.finished.connect(self.speaker_finished)
         self.speaking = False
@@ -95,6 +100,7 @@ class Window(QMainWindow):
         self.last_reply = ""
         self.drafted.connect(self.draft_finished)
         self.viewed.connect(self.view_finished)
+        self.view_captured.connect(self.record_view)
         self.view_job = None
         self.watch_request = None
         self.watch_timer = QTimer(self)
@@ -179,6 +185,10 @@ class Window(QMainWindow):
         self.offer = self.controls.addAction("Review suggestion", self.follow_suggestion)
         self.offer.setVisible(False)
         self.controls.addSeparator()
+        control = self.controls.addMenu("Desktop control")
+        self.desktop_control = DesktopControl(self)
+        control.addAction("Start task…", self.desktop_control_prompt)
+        control.addAction("Stop task", self.stop_desktop_control)
         self.controls.addAction("Manual request…", lambda: self.manual.show())
         self.controls.addAction("Settings…", lambda: self.settings.show())
         self.controls.addAction("Check for updates", lambda: self.check_updates(manual=True))
@@ -197,6 +207,7 @@ class Window(QMainWindow):
         stack.addWidget(title)
 
         self.journal = ChatJournal()
+        self.journal.anchorClicked.connect(self.show_snapshot)
         stack.addWidget(self.journal, 1)
         self.settings = self.popup("Settings", 580, 520)
         form = QFormLayout(self.settings)
@@ -341,6 +352,7 @@ class Window(QMainWindow):
         menu.addAction("Start listening", self.start)
         menu.addAction("Pause", self.pause)
         menu.addAction("Ask assistant", self.show_panel)
+        menu.addAction("Stop desktop task", self.stop_desktop_control)
         menu.addAction("Check for updates", lambda: self.check_updates(manual=True))
         menu.addAction("Quit", QApplication.instance().quit)
         self.tray.setContextMenu(menu)
@@ -510,9 +522,11 @@ class Window(QMainWindow):
             self.last_status = "Listening"
 
     def pause(self):
+        self.desktop_control.stop(show=bool(self.desktop_control.task))
         self.stop_monitor()
         self.audio.stop()
         self.speaker.stop()
+        self.speech_overlay.end()
         self.speaking = False
         self.voice_approval = None
         self.clarification = None
@@ -556,6 +570,7 @@ class Window(QMainWindow):
         self.output.clear()
 
     def switch_provider(self):
+        self.stop_desktop_control()
         self.stop_monitor()
         self.models[self.current_provider] = self.model.text()
         self.current_provider = self.provider.currentData()
@@ -711,6 +726,7 @@ class Window(QMainWindow):
     def load_chat(self):
         chat = self.history.chat
         self.chat_title.setText(chat.title)
+        self.journal.snapshots.clear()
         self.journal.set_entries("".join(self.entry_html(*entry) for entry in chat.entries))
         self.chat_list.blockSignals(True)
         self.chat_list.clear()
@@ -745,20 +761,20 @@ class Window(QMainWindow):
         if item:
             self.change_chat(item.data(Qt.UserRole))
 
-    @staticmethod
-    def entry_html(stamp, source, text):
+    def entry_html(self, stamp, source, text, attachments=None):
         conversation = source in ("You", "Assistant")
         color = "#ececec" if conversation else "#ababab"
         label_color = "#eeeeee" if conversation else "#b0b0b0"
         return (f'<p style="margin-bottom:12px"><b style="color:{label_color}">{escape(source)}</b> &nbsp;'
                 f'<span style="color:#a2a2a2">{escape(stamp)}</span><br>'
-                f'<span style="color:{color}">{escape(text).replace(chr(10), "<br>")}</span></p>')
+                f'<span style="color:{color}">{escape(text).replace(chr(10), "<br>")}</span></p>'
+                + (self.journal.image_html(attachments) if attachments else ""))
 
     def remember_turn(self, kind, request, answer):
         self.history.chat.turns.append([kind, request[:3000], answer[:24000]])
         self.history_timer.start()
 
-    def log(self, source, text):
+    def log(self, source, text, attachments=None):
         if self.session.active and text:
             chat = self.history.chat
             if source == "You" and chat.title == "New chat":
@@ -768,9 +784,34 @@ class Window(QMainWindow):
                 if item:
                     item.setText(chat.title)
             entry = [datetime.now().strftime("%H:%M:%S"), source, text[:24000]]
+            if attachments:
+                entry.append(attachments)
             chat.entries.append(entry)
             self.journal.append_entry(self.entry_html(*entry))
             self.history_timer.start()
+
+    def record_frames(self, label, frames):
+        attachments = self.journal.encode_frames(frames)
+        if attachments:
+            self.log("Screen", label, attachments)
+
+    def record_view(self, job, frames):
+        if self.view_job is job and self.session.active:
+            self.record_frames("Screen shared with the model", frames)
+
+    def show_snapshot(self, url):
+        image = self.journal.snapshots.get(url.path())
+        if url.scheme() != "assistant-snapshot" or image is None:
+            return
+        popup = self.popup("Captured screen", 950, 650)
+        popup.setAttribute(Qt.WA_DeleteOnClose)
+        layout = QVBoxLayout(popup)
+        preview = QLabel(alignment=Qt.AlignCenter)
+        screen = self.screen().availableGeometry()
+        preview.setPixmap(QPixmap.fromImage(image).scaled(screen.width() - 80, screen.height() - 120,
+                                                          Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        layout.addWidget(preview)
+        popup.show()
 
     def mic_sample(self, generation, amount):
         if generation == self.audio.generation and self.session.active:
@@ -784,6 +825,9 @@ class Window(QMainWindow):
         if generation == self.speaker.generation and self.speaking:
             self.audio_status = "Assistant speaking · microphone paused"
             self.ai_meter.sample(amount)
+            if not self.speech_overlay.isVisible() and self.spoken_text:
+                self.speech_overlay.begin(self.spoken_text)
+            self.speech_overlay.sample(amount)
 
     def speech_setting(self, enabled):
         if not enabled and self.speaking:
@@ -791,6 +835,7 @@ class Window(QMainWindow):
             self.end_speech()
 
     def end_speech(self):
+        self.speech_overlay.end()
         self.speaking = False
         self.ai_meter.clear()
         self.refresh_audio()
@@ -821,7 +866,9 @@ class Window(QMainWindow):
         self.partial_text = ""
         self.speaking = True
         self.audio_status = "Preparing speech · microphone paused"
-        self.speaker.start(text[:420], api_key=api_key, voice=voice or "marin")
+        self.speech_overlay.end()
+        self.spoken_text = text[:420]
+        self.speaker.start(self.spoken_text, api_key=api_key, voice=voice or "marin")
 
     def transcription_settings_changed(self, enabled):
         if enabled:
@@ -888,6 +935,7 @@ class Window(QMainWindow):
             return
         if self.speaking:
             self.speaker.stop()
+            self.speech_overlay.end()
             self.speaking = False
             self.ai_meter.clear()
         self.start_microphone()
@@ -965,6 +1013,19 @@ class Window(QMainWindow):
             self.last_status = text
             self.say(text)
 
+    def desktop_control_prompt(self):
+        if not self.session.active:
+            QMessageBox.information(self, "Desktop control", "Start listening before beginning a desktop task.")
+            return
+        request, accepted = QInputDialog.getText(self, "Desktop control", "What should I do on the selected display?")
+        if accepted and request.strip():
+            self.desktop_control.start(request.strip())
+
+    def stop_desktop_control(self):
+        if self.desktop_control.task:
+            self.desktop_control.stop(show=True)
+            self.log("Control", "Desktop task stopped.")
+
     def ask(self, *, voice_request=None):
         voice = voice_request is not None
         request = voice_request.strip()[:1500] if voice else self.request.text().strip()
@@ -972,11 +1033,15 @@ class Window(QMainWindow):
         if voice and words in ("pause", "stop listening", "pause listening"):
             self.pause()
             return
+        if voice and words in ("stop controlling", "stop desktop control", "stop desktop task"):
+            self.stop_desktop_control()
+            return
         if voice and words in ("stop watching", "stop the watch", "stop checking"):
             self.stop_watch()
             self.say("I stopped checking the screen.")
             return
         if voice and words in ("stop sharing", "stop screen sharing", "stop monitor sharing"):
+            self.stop_desktop_control()
             self.stop_monitor()
             self.say("Screen sharing stopped.")
             return
@@ -993,6 +1058,20 @@ class Window(QMainWindow):
                 self.ask(voice_request=follow_up)
             else:
                 self.say("Okay. What would you like to do next?")
+            return
+        desktop_request = re.match(
+            r"^(?:please |can you |could you )?(?:use (?:my |the )?computer to|control (?:my |the )?desktop to)\s+(.+)",
+            request, re.IGNORECASE)
+        if desktop_request:
+            self.desktop_control.start(desktop_request[1])
+            return
+        direct_input = re.match(r"^(?:please |can you |could you )?(?:click|double[- ]click|right[- ]click|scroll|drag|press|type)\s+",
+                                request, re.IGNORECASE)
+        if direct_input:
+            self.desktop_control.start(request)
+            return
+        if self.desktop_control.task:
+            self.log("Control", "Review the desktop input or say stop desktop control.")
             return
         if self.view_job and self.view_job[5]:
             self.cancel_view()
@@ -1117,6 +1196,7 @@ class Window(QMainWindow):
             self.view_job = None
 
     def discard_task(self):
+        self.stop_desktop_control()
         self.stop_watch()
         self.cancel_view()
         self.model_job = None
@@ -1173,6 +1253,9 @@ class Window(QMainWindow):
             monitor.close()
 
     def look_at_window(self, request=None, source=WINDOW, *, rechecking=False):
+        if self.desktop_control.task:
+            self.message("Finish the desktop task before opening another screen capture.")
+            return
         if not rechecking:
             self.stop_watch()
         if not self.session.active:
@@ -1219,11 +1302,14 @@ class Window(QMainWindow):
                     monitor = shared or select_source(MONITOR, cancel)
                     if shared is None:
                         self.monitor_selected.emit(job, monitor)
+                        if cancel.wait(0.3):
+                            return
                     frame = monitor.frame(cancel)
                 else:
                     frame = capture_frame(source, cancel)
                 if cancel.is_set():
                     return
+                self.view_captured.emit(job, frame)
                 result = complete(model, "", request, {"profile": profile}, "general", api_key=api_key, image=frame,
                                   may_wait=source == MONITOR, rechecking=rechecking)
                 self.viewed.emit(job, result, "")
@@ -1457,7 +1543,8 @@ class Window(QMainWindow):
                 if self.tray.isVisible() and not self.isVisible():
                     self.tray.showMessage(title, message)
                 self.log("Suggestion", message)
-                if not self.speaking and not self.user_speaking and not self.model_job and not self.view_job and not proposal:
+                if (not self.speaking and not self.user_speaking and not self.model_job and not self.view_job
+                        and not self.desktop_control.task and not proposal):
                     command = "review suggestion" if self.conversation.isChecked() else "Assistant, review suggestion"
                     self.say(f"{message} Say {command}.", record=False)
         proposal_id = proposal.id if proposal else None
@@ -1528,6 +1615,8 @@ def main():
         if "window" in locals():
             window.audio.stop()
             window.speaker.stop()
+            window.speech_overlay.end()
+            window.desktop_control.stop()
             window.stop_monitor()
             window.save_profile()
             try:

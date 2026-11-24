@@ -12,9 +12,9 @@ from assistant_app.drafting import DraftResult
 from assistant_app.session import Session
 
 
-def settle():
+def settle(milliseconds=100):
     loop = QEventLoop()
-    QTimer.singleShot(100, loop.quit)
+    QTimer.singleShot(milliseconds, loop.quit)
     loop.exec_()
 
 
@@ -81,7 +81,7 @@ def main():
                 DraftResult("", "", True), DraftResult("Same two monitors.", ""),
             ]) as model:
         hear("Which file is visible in Rider?")
-        settle()
+        settle(500)
         hear("What is visible in my browser?")
         settle()
         picker.assert_called_once()
@@ -99,7 +99,7 @@ def main():
                 DraftResult("", "", True), pending_ledger, pending_ledger, DraftResult("Ledger total: 562,604 gold.", ""),
             ]):
         hear("Can you read my TSM ledger?")
-        settle()
+        settle(500)
         assert window.stop_watch_button.isVisible()
         window.check_watch()
         settle()
