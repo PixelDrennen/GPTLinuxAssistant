@@ -13,10 +13,10 @@ from urllib.parse import urlsplit
 
 from gi.repository import GLib
 from PyQt5.QtCore import QSettings, QTimer, Qt, QUrl, pyqtSignal
-from PyQt5.QtGui import QDesktopServices
+from PyQt5.QtGui import QDesktopServices, QTextOption
 from PyQt5.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QStyle, QSystemTrayIcon, QTextBrowser,
+    QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QStyle, QSystemTrayIcon, QTextBrowser, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -28,7 +28,7 @@ from .live import VoiceMeter
 from .session import Session
 from .speech import Microphone
 from .theme import STYLE
-from . import updates
+from . import credentials, updates
 from .voice import Speaker
 from .window_view import CaptureCanceled, MONITOR, WINDOW, capture_frame, select_source
 
@@ -39,13 +39,18 @@ class Window(QMainWindow):
     monitor_selected = pyqtSignal(object, object)
     update_checked = pyqtSignal(object, str, bool)
     update_installed = pyqtSignal(str)
+    key_finished = pyqtSignal(str, str, bool)
 
     def __init__(self, session, args):
         super().__init__()
         self.session = session
+        self.api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        self.key_pending = False
+        self.key_finished.connect(self.key_result)
         data_home = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
         self.data_dir = data_home / "gpt-linux-assistant"
         self.profile_settings = QSettings("PixelDrennen", "GPT Linux Assistant")
+        self.cli_provider = bool(args.openai_model or args.ollama_model)
         self.profile = self.profile_settings.value("profile", "work")
         if self.profile not in ("work", "play"):
             self.profile = "work"
@@ -86,6 +91,7 @@ class Window(QMainWindow):
         self.hint_seen = -float("inf")
         self.last_tray_state = None
         self.audio_status = ""
+        self.partial_text = ""
         self.setWindowTitle("GPT Linux Assistant")
         self.setStyleSheet(STYLE)
         self.resize(1100, 760)
@@ -96,17 +102,20 @@ class Window(QMainWindow):
         self.setCentralWidget(surface)
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(230)
+        sidebar.setFixedWidth(200)
         navigation = QVBoxLayout(sidebar)
-        navigation.setContentsMargins(15, 19, 15, 16)
+        navigation.setContentsMargins(9, 11, 9, 10)
+        navigation.setSpacing(6)
+        sidebar_top = QHBoxLayout()
         self.profile_picker = QComboBox()
+        self.profile_picker.setObjectName("profile")
         self.profile_picker.addItem("Work", "work")
         self.profile_picker.addItem("Play", "play")
         self.profile_picker.setAccessibleName("Work or Play profile")
         self.profile_picker.setCurrentIndex(self.profile_picker.findData(self.profile))
-        navigation.addWidget(self.profile_picker)
-        self.button(navigation, "+ New chat", self.new_chat).setObjectName("primary")
-        navigation.addWidget(self.label("Chats"))
+        sidebar_top.addWidget(self.profile_picker, 1)
+        self.circle(sidebar_top, "+", "New chat", self.new_chat)
+        navigation.addLayout(sidebar_top)
         self.chat_list = QListWidget()
         self.chat_list.setObjectName("chats")
         self.chat_list.setAccessibleName("Chats")
@@ -114,87 +123,67 @@ class Window(QMainWindow):
         self.chat_list.setTextElideMode(Qt.ElideRight)
         self.chat_list.currentItemChanged.connect(self.select_chat)
         navigation.addWidget(self.chat_list, 1)
-        self.history_note = self.label("History saved on this computer")
+        self.history_note = self.label("")
         self.history_note.setObjectName("muted")
         navigation.addWidget(self.history_note)
+        self.history_note.hide()
+        self.voice_row = QWidget()
+        signals = QHBoxLayout(self.voice_row)
+        signals.setContentsMargins(4, 0, 4, 0)
+        signals.setSpacing(8)
+        self.mic_meter = VoiceMeter("Your microphone", "#d6d6d6", compact=True)
+        self.ai_meter = VoiceMeter("Assistant voice", "#a3a3a3", compact=True)
+        for meter in (self.mic_meter, self.ai_meter):
+            meter.setToolTip(meter.accessibleName())
+            signals.addWidget(meter)
+        navigation.addWidget(self.voice_row)
+        controls = QHBoxLayout()
+        controls.setSpacing(5)
+        self.listen_button = self.circle(controls, "▶", "Start listening", self.toggle_listening)
+        self.state = self.label("")
+        self.state.setObjectName("muted")
+        self.state.setWordWrap(False)
+        controls.addWidget(self.state, 1)
+        menu_button = self.circle(controls, "⋯", "Assistant menu")
+        navigation.addLayout(controls)
         shell.addWidget(sidebar)
+        self.controls = QMenu(menu_button)
+        menu_button.setMenu(self.controls)
+        menu_button.setPopupMode(QToolButton.InstantPopup)
+        self.controls.addAction("Ask by voice", self.ask_voice)
+        share = self.controls.addMenu("Screen sharing")
+        self.view_button = share.addAction("View a window", self.look_at_window)
+        self.monitor_button = share.addAction("View monitors", lambda: self.look_at_window(source=MONITOR))
+        self.stop_monitor_button = share.addAction("Stop monitor sharing", self.stop_monitor)
+        self.stop_monitor_button.setVisible(False)
+        self.offer = self.controls.addAction("Review suggestion", self.follow_suggestion)
+        self.offer.setVisible(False)
+        self.controls.addSeparator()
+        self.controls.addAction("Manual request…", lambda: self.manual.show())
+        self.controls.addAction("Settings…", lambda: self.settings.show())
+        self.controls.addAction("Check for updates", lambda: self.check_updates(manual=True))
+
         root = QWidget()
         root.setObjectName("workspace")
-        self.scroller = QScrollArea()
-        self.scroller.setWidgetResizable(True)
-        self.scroller.setWidget(root)
-        shell.addWidget(self.scroller, 1)
+        shell.addWidget(root, 1)
         stack = QVBoxLayout(root)
-        stack.setContentsMargins(18, 16, 18, 16)
-        stack.setSpacing(9)
-
-        header = QHBoxLayout()
+        stack.setContentsMargins(24, 17, 24, 12)
+        stack.setSpacing(10)
         self.chat_title = title = self.label("New chat")
-        title.setObjectName("appTitle")
         title_font = title.font()
-        title_font.setPointSize(title_font.pointSize() + 7)
+        title_font.setPointSize(title_font.pointSize() + 3)
         title_font.setBold(True)
         title.setFont(title_font)
-        header.addWidget(title, 1)
-        stack.addLayout(header)
-        self.state = self.label("")
-        self.state.setObjectName("state")
-        self.audio_note = self.label("")
-        self.summary = self.label("")
-        self.apps = self.label("")
-        self.status = self.label("")
-        header.addWidget(self.state)
-        for label in (self.audio_note, self.summary, self.apps, self.status):
-            stack.addWidget(label)
-        row = QHBoxLayout()
-        stack.addLayout(row)
-        self.start_button = self.button(row, "Start listening", self.start)
-        self.pause_button = self.button(row, "Pause", self.pause)
-        self.button(row, "Ask by voice", self.ask_voice)
-        self.start_button.setObjectName("primary")
-        self.view_button = self.button(row, "View window", self.look_at_window)
-        self.monitor_button = self.button(row, "View monitors", lambda: self.look_at_window(source=MONITOR))
-        self.stop_monitor_button = self.button(stack, "Stop monitor sharing", self.stop_monitor)
-        self.stop_monitor_button.hide()
-        self.offer = self.button(stack, "Review suggestion", self.follow_suggestion)
-        self.offer.hide()
+        stack.addWidget(title)
 
-        voice_card = QWidget()
-        voice_card.setObjectName("voiceCard")
-        signals = QHBoxLayout(voice_card)
-        signals.setContentsMargins(14, 11, 14, 11)
-        signals.setSpacing(18)
-        for label, color in (("You", "#16b8b1"), ("Assistant voice", "#8a70e0")):
-            column = QVBoxLayout()
-            column.addWidget(self.label(label))
-            meter = VoiceMeter(label, color)
-            column.addWidget(meter)
-            signals.addLayout(column)
-            if label == "You":
-                self.mic_meter = meter
-            else:
-                self.ai_meter = meter
-        stack.addWidget(voice_card)
-        self.partial = self.label("")
-        self.partial.setObjectName("muted")
-        self.partial.hide()
-        stack.addWidget(self.partial)
         self.journal = QTextBrowser()
         self.journal.setObjectName("journal")
         self.journal.setOpenLinks(False)
-        self.journal.setReadOnly(True)
-        self.journal.setAccessibleName("Activity log")
-        self.journal.setPlaceholderText("Activity log")
-        self.journal.setMinimumHeight(170)
-        stack.addWidget(self.label("Activity log"))
+        self.journal.setAccessibleName("Chat and activity")
+        self.journal.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         stack.addWidget(self.journal, 1)
-        self.settings_button = QPushButton("Setup")
-        self.settings_button.setCheckable(True)
-        stack.addWidget(self.settings_button)
-        settings = QGroupBox("Voice, context and permissions")
-        self.settings_button.toggled.connect(settings.setVisible)
-        form = QFormLayout(settings)
-        stack.addWidget(settings)
+        self.settings = self.popup("Settings", 580, 520)
+        form = QFormLayout(self.settings)
         self.mic = QCheckBox("Use microphone (Vosk)")
         default_path = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "gpt-linux-assistant/vosk-model"
         mic_path = args.vosk_model or (str(default_path) if default_path.is_dir() else "")
@@ -219,7 +208,7 @@ class Window(QMainWindow):
         self.provider = QComboBox()
         self.provider.addItem("Local Ollama", "ollama")
         self.provider.addItem("OpenAI API", "openai")
-        use_openai = args.openai_model or (os.environ.get("OPENAI_API_KEY") and not args.ollama_model)
+        use_openai = args.openai_model or (self.api_key and not args.ollama_model)
         self.provider.setCurrentIndex(1 if use_openai else 0)
         self.models = {"ollama": args.ollama_model or "gemma4", "openai": args.openai_model or "gpt-4.1-mini"}
         self.model = QLineEdit(self.models[self.provider.currentData()])
@@ -227,6 +216,16 @@ class Window(QMainWindow):
         self.current_provider = self.provider.currentData()
         self.provider.currentIndexChanged.connect(self.switch_provider)
         form.addRow(self.provider, self.model)
+        key_row = QHBoxLayout()
+        self.key_field = QLineEdit()
+        self.key_field.setEchoMode(QLineEdit.Password)
+        self.key_field.setPlaceholderText("Paste an OpenAI API key")
+        self.key_field.returnPressed.connect(self.store_api_key)
+        key_row.addWidget(self.key_field, 1)
+        self.key_save = self.button(key_row, "Save to wallet", self.store_api_key)
+        self.key_status = self.label("")
+        form.addRow(key_row)
+        form.addRow(self.key_status)
         self.include_narration = QCheckBox("Include recent narration and app focus in model requests")
         self.auto_view = QCheckBox("Let the assistant request monitor context when needed")
         self.auto_view.setChecked(True)
@@ -256,16 +255,8 @@ class Window(QMainWindow):
         self.rider.setChecked(True)
         self.unity.setChecked(True)
 
-        self.settings_button.setChecked(not (mic_path and self.model.text()))
-        settings.setVisible(self.settings_button.isChecked())
-        self.manual_button = QPushButton("Manual controls")
-        self.manual_button.setCheckable(True)
-        stack.addWidget(self.manual_button)
-        work = QGroupBox("Request and draft")
-        self.manual_button.toggled.connect(work.setVisible)
-        work.hide()
-        form = QFormLayout(work)
-        stack.addWidget(work)
+        self.manual = self.popup("Manual request", 570, 470)
+        form = QFormLayout(self.manual)
         self.workflow = QComboBox()
         for label, value in (("Rider", "rider"), ("Unity", "unity"), ("Web browser", "browser"),
                              ("Slack", "slack"), ("Other app", "general")):
@@ -297,8 +288,8 @@ class Window(QMainWindow):
         self.link_button.clicked.connect(self.open_preview)
         form.addRow(self.url, self.link_button)
 
-        self.review = QGroupBox("Approve this action")
-        stack.addWidget(self.review)
+        self.review = self.popup("Approve this action", 660, 280)
+        self.review.rejected.connect(self.dismiss_review)
         layout = QVBoxLayout(self.review)
         self.target_label = self.label("")
         layout.addWidget(self.target_label)
@@ -360,6 +351,85 @@ class Window(QMainWindow):
         if getattr(args, "check_updates", False):
             self.update_timer.start()
             QTimer.singleShot(1800, self.check_updates)
+
+    def popup(self, title, width, height):
+        dialog = QDialog(self, Qt.Tool)
+        dialog.setWindowTitle(title)
+        dialog.resize(width, height)
+        return dialog
+
+    @staticmethod
+    def circle(layout, symbol, title, callback=None):
+        button = QToolButton()
+        button.setObjectName("circle")
+        button.setFixedSize(30, 30)
+        button.setText(symbol)
+        button.setToolTip(title)
+        button.setAccessibleName(title)
+        if callback:
+            button.clicked.connect(callback)
+        layout.addWidget(button)
+        return button
+
+    def toggle_listening(self):
+        if self.session.active:
+            self.pause()
+        else:
+            self.start()
+        self.render()
+
+    def dismiss_review(self):
+        if self.previewed and self.session.proposal:
+            self.respond(False, self.previewed)
+
+    def retrieve_api_key(self):
+        if self.key_pending:
+            return
+        env_key = self.api_key
+        self.key_pending = True
+        self.key_save.setEnabled(False)
+        self.key_status.setText("Checking desktop wallet…")
+
+        def lookup():
+            try:
+                saved = credentials.read_key()
+                if not saved and env_key:
+                    credentials.save_key(env_key)
+                    saved = env_key
+                self.key_finished.emit(saved, "", False)
+            except (RuntimeError, ValueError) as exc:
+                self.key_finished.emit("", str(exc), False)
+        Thread(target=lookup, daemon=True).start()
+
+    def store_api_key(self):
+        key = self.key_field.text().strip()
+        if not key or self.key_pending:
+            return
+        self.key_pending = True
+        self.key_save.setEnabled(False)
+        self.key_status.setText("Saving to desktop wallet…")
+
+        def store():
+            try:
+                credentials.save_key(key)
+                self.key_finished.emit(key, "", True)
+            except (RuntimeError, ValueError) as exc:
+                self.key_finished.emit("", str(exc), True)
+        Thread(target=store, daemon=True).start()
+
+    def key_result(self, key, error, explicit):
+        self.key_pending = False
+        self.key_save.setEnabled(True)
+        if key:
+            self.api_key = key
+            self.key_field.clear()
+            self.key_status.setText("OpenAI API key saved in the desktop wallet.")
+            no_provider = not self.profile_settings.contains(self.profile + "/provider")
+            if explicit or (no_provider and not self.cli_provider):
+                self.provider.setCurrentIndex(self.provider.findData("openai"))
+                self.save_profile()
+        else:
+            self.key_status.setText(error or "No OpenAI API key saved.")
 
     @staticmethod
     def label(value):
@@ -423,8 +493,7 @@ class Window(QMainWindow):
         self.last_focus = ""
         self.mic_meter.clear()
         self.ai_meter.clear()
-        self.partial.clear()
-        self.partial.hide()
+        self.partial_text = ""
         if self.session.active:
             self.log("Session", "Listening paused.")
         self.save_chat()
@@ -523,6 +592,7 @@ class Window(QMainWindow):
             self.profile_picker.setCurrentIndex(self.profile_picker.findData(self.profile))
             self.profile_picker.blockSignals(False)
             self.history_note.setText("Could not open the other profile")
+            self.history_note.show()
             return
         was_active = self.session.active
         self.pause()
@@ -592,9 +662,10 @@ class Window(QMainWindow):
         except (OSError, sqlite3.Error):
             self.history_error = True
             self.history_note.setText("Could not save chat history")
+            self.history_note.show()
         else:
             if self.history_error:
-                self.history_note.setText("History saved on this computer")
+                self.history_note.hide()
             self.history_error = False
 
     def load_chat(self):
@@ -625,6 +696,7 @@ class Window(QMainWindow):
             self.history.select(chat_id)
         except (OSError, ValueError, sqlite3.Error):
             self.history_note.setText("Could not open this chat")
+            self.history_note.show()
         self.load_chat()
         if was_active:
             self.start()
@@ -638,10 +710,12 @@ class Window(QMainWindow):
 
     @staticmethod
     def entry_html(stamp, source, text):
-        colors = {"You": "#84e1ce", "Assistant": "#baabff", "Approval": "#f2c478", "Suggestion": "#82b8ff"}
-        return (f'<p style="margin-bottom:10px"><span style="color:#899cb8">{escape(stamp)}</span> &nbsp;'
-                f'<b style="color:{colors.get(source, "#bacbe4")}">{escape(source)}</b><br>'
-                f'<span style="color:#edf2ff">{escape(text).replace(chr(10), "<br>")}</span></p>')
+        conversation = source in ("You", "Assistant")
+        color = "#ececec" if conversation else "#ababab"
+        label_color = "#eeeeee" if conversation else "#b0b0b0"
+        return (f'<p style="margin-bottom:12px"><b style="color:{label_color}">{escape(source)}</b> &nbsp;'
+                f'<span style="color:#a2a2a2">{escape(stamp)}</span><br>'
+                f'<span style="color:{color}">{escape(text).replace(chr(10), "<br>")}</span></p>')
 
     def remember_turn(self, kind, request, answer):
         self.history.chat.turns.append([kind, request[:3000], answer[:24000]])
@@ -667,8 +741,7 @@ class Window(QMainWindow):
 
     def mic_partial(self, generation, text):
         if generation == self.audio.generation and self.session.active:
-            self.partial.setText(text[:300])
-            self.partial.setVisible(bool(text))
+            self.partial_text = text[:300]
 
     def speaker_sample(self, generation, amount):
         if generation == self.speaker.generation and self.speaking:
@@ -700,16 +773,15 @@ class Window(QMainWindow):
         if not self.spoken.isChecked():
             return
         voice = self.cloud_voice()
-        api_key = os.environ.get("OPENAI_API_KEY", "").strip() if voice else None
+        api_key = self.api_key if voice else None
         if voice and not api_key:
-            self.log("Audio", "Set OPENAI_API_KEY to use the selected voice.")
+            self.log("Audio", "Save an OpenAI API key in Settings to use this voice.")
             return
         self.audio.stop()
         self.mode = None
         self.voice_approval = None
         self.mic_meter.clear()
-        self.partial.clear()
-        self.partial.hide()
+        self.partial_text = ""
         self.speaking = True
         self.audio_status = "Preparing speech · microphone paused"
         self.speaker.start(text[:420], api_key=api_key, voice=voice or "marin")
@@ -923,9 +995,9 @@ class Window(QMainWindow):
             return
         api_key = None
         if self.current_provider == "openai":
-            api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+            api_key = self.api_key
             if not api_key:
-                self.answer("OpenAI is selected. Launch the assistant with your OpenAI API key set.", voice)
+                self.answer("OpenAI is selected. Save your API key in Settings.", voice)
                 return
         original = target.data["text"] if target else self.input.toPlainText()
         if len(original) > 16000:
@@ -964,12 +1036,12 @@ class Window(QMainWindow):
             self.shared_monitor.close()
             self.shared_monitor = None
             self.log("Screen", "Monitor sharing stopped.")
-        self.stop_monitor_button.hide()
+        self.stop_monitor_button.setVisible(False)
 
     def on_monitor_selected(self, job, monitor):
         if self.view_job is job and self.session.active and not job[0].is_set():
             self.shared_monitor = monitor
-            self.stop_monitor_button.show()
+            self.stop_monitor_button.setVisible(True)
             self.log("Screen", "Selected monitors are available for on-demand frames during this session.")
         else:
             monitor.close()
@@ -989,9 +1061,9 @@ class Window(QMainWindow):
             self.answer("Choose a vision-capable model under Setup first.", True)
             return
         cloud = self.current_provider == "openai"
-        api_key = os.environ.get("OPENAI_API_KEY", "").strip() if cloud else None
+        api_key = self.api_key if cloud else None
         if cloud and not api_key:
-            self.answer("Set your OpenAI API key before sharing a window.", True)
+            self.answer("Save your OpenAI API key in Settings before sharing a window.", True)
             return
         if not isinstance(request, str):
             request = self.request.text().strip() or "Briefly describe what is visible and how you could help."
@@ -1073,7 +1145,8 @@ class Window(QMainWindow):
         if error:
             self.message("Model request failed. " + error)
             if voice:
-                self.say("The model request failed. Check the activity log for details.")
+                self.say(error if error.startswith("Ollama is offline.") else
+                         "The model request failed. Check the chat for details.")
             return
         if result.needs_view:
             if self.auto_view.isChecked():
@@ -1134,7 +1207,7 @@ class Window(QMainWindow):
         elif kind in ("slack", "browser"):
             self.workflow.setCurrentIndex(self.workflow.findData(kind))
             self.show_panel()
-            self.manual_button.setChecked(True)
+            self.manual.show()
             self.input.setFocus()
             self.answer("Share the relevant excerpt, then tell me what you need.", True)
 
@@ -1199,22 +1272,23 @@ class Window(QMainWindow):
             targets = dict(session.targets)
             hint_time = session.last_hint
         self.state.setText("Listening" if active else "Paused")
-        self.start_button.setEnabled(not active)
-        self.pause_button.setEnabled(active)
+        if active != self.last_tray_state:
+            self.listen_button.setText("■" if active else "▶")
+            label = "Pause listening" if active else "Start listening"
+            self.listen_button.setToolTip(label)
+            self.listen_button.setAccessibleName(label)
+        self.voice_row.setVisible(active)
         self.tray.setToolTip("GPT Linux Assistant · " + ("Listening" if active else "Paused"))
         if active != self.last_tray_state:
             self.tray.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay if active else QStyle.SP_MediaPause))
             self.last_tray_state = active
-        self.audio_note.setText(self.audio_status)
-        self.audio_note.setVisible(bool(self.audio_status))
-        self.summary.setText(summary if active else "")
-        self.apps.setText("Open apps: " + apps if apps else "")
-        self.apps.setVisible(bool(apps))
         shared = [target.label for target in targets.values() if target.kind != "desktop"]
+        detail = [status, self.audio_status, self.partial_text, summary if active else ""]
+        if apps:
+            detail.append("Open apps: " + apps)
         if shared:
-            status += "\nShared: " + ", ".join(shared)
-        self.status.setText(status)
-        self.status.setVisible(status not in ("Listening", "Paused"))
+            detail.append("Shared: " + ", ".join(shared))
+        self.state.setToolTip("\n".join(filter(None, detail)))
         if focus != self.last_focus:
             self.last_focus = focus
             if focus:
@@ -1259,7 +1333,7 @@ class Window(QMainWindow):
                 label += f' · Selected range {span["start"]}–{span["end"]}'
             self.target_label.setText(label)
             if proposal:
-                QTimer.singleShot(0, lambda: self.scroller.ensureWidgetVisible(self.review, 0, 0))
+                self.review.raise_()
                 self.log("Approval", label)
                 action = {"rider": "The Rider replacement", "unity": "The Unity connection",
                           "desktop": proposal.target.label}[proposal.target.kind]
@@ -1300,6 +1374,7 @@ def main():
     try:
         window = Window(session, args)
         window.show()
+        QTimer.singleShot(0, window.retrieve_api_key)
         result = app.exec_()
     except (OSError, sqlite3.Error) as exc:
         QMessageBox.critical(None, "Cannot open chat history", str(exc))

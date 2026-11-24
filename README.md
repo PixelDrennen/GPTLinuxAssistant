@@ -13,7 +13,7 @@ A voice-first tray assistant for Fedora KDE Plasma 6 on Wayland. Start a listeni
 ## Run on Fedora
 
 ```bash
-sudo dnf install python3-qt5 python3-gobject qt5-qtwayland pipewire-utils espeak-ng
+sudo dnf install python3-qt5 python3-gobject qt5-qtwayland pipewire-utils espeak-ng libsecret
 git clone https://github.com/PixelDrennen/GPTLinuxAssistant.git
 cd GPTLinuxAssistant
 /usr/bin/python3 -m assistant_app
@@ -35,14 +35,7 @@ Enable **GPT Linux Assistant** in System Settings → Window Management → KWin
 2. Download and extract a small English model from the [Vosk model catalog](https://alphacephei.com/vosk/models). Put the extracted model directory at `~/.local/share/gpt-linux-assistant/vosk-model`, or pass its path with `--vosk-model`.
 3. Choose a model for conversation and drafting.
 
-   - **OpenAI API.** Launch with the API key in your environment. The prompt below accepts it without displaying it or putting the key itself into shell history.
-
-     ```bash
-     read -rsp 'OpenAI API key: ' OPENAI_API_KEY
-     printf '\n'
-     export OPENAI_API_KEY
-     .venv/bin/python -m assistant_app --openai-model gpt-4.1-mini
-     ```
+   - **OpenAI API.** Open **⋯ → Settings**, enter the key, and click **Save to wallet**. This selects OpenAI for the current profile. The desktop wallet keeps the key across launches and shares it across Work and Play. You can still launch with `OPENAI_API_KEY`. If the wallet has no saved key, the app imports that key when the wallet is available.
 
    - **Local Ollama.** Run [Ollama](https://ollama.com/) with a downloaded local model and cloud features disabled (`OLLAMA_NO_CLOUD=1` in the Ollama server environment). Launch with `.venv/bin/python -m assistant_app --ollama-model YOUR_MODEL`.
 
@@ -60,9 +53,9 @@ Select **Start listening** once. Conversation mode is on by default. Speak your 
 | “Approve it” or “Decline it” | Respond to the single visible approval preview after the announcement ends. |
 | “repeat that” or “pause” | Replay the last model reply or stop the session. |
 
-The microphone and assistant meters use microphone audio and the assistant's local playback signal. Vosk transcribes locally. OpenAI replies use the Marin voice by default and stream audio through PipeWire as it arrives. Under **Setup**, pick **OpenAI · Cedar** for a different voice, or choose either OpenAI voice alongside local Ollama using `OPENAI_API_KEY`. The fully local voice uses eSpeak NG. The microphone pauses while the assistant speaks so playback cannot be treated as a request or approval. Wait for the microphone indicator to resume before talking. **Quiet mode** suppresses unsolicited suggestions, and **Speak replies** can mute audio. **Manual controls** exposes text inputs and preview controls when useful.
+The microphone and assistant meters use microphone audio and the assistant's local playback signal. Vosk transcribes locally. OpenAI replies use the Marin voice by default and stream audio through PipeWire as it arrives. Under **Setup**, pick **OpenAI · Cedar** for a different voice, or choose either OpenAI voice alongside local Ollama using `OPENAI_API_KEY`. The fully local voice uses eSpeak NG. The microphone pauses while the assistant speaks so playback cannot be treated as a request or approval. Wait for the microphone indicator to resume before talking. **Quiet mode** suppresses unsolicited suggestions, and **Speak replies** can mute audio. **⋯ → Manual request** opens text inputs and preview controls when useful.
 
-When you choose an OpenAI voice, the assistant’s spoken text is sent for synthesis. When you choose OpenAI for replies, the request text, selected draft or excerpt, and up to four recent turns from the current chat and workflow can be sent to the API. By default, active session narration and focused app identity can be sent too. Turn off that scope in **Setup**. Microphone audio stays local, and the app uses the API key from the environment without saving it.
+When you choose an OpenAI voice, the assistant’s spoken text is sent for synthesis. When you choose OpenAI for replies, the request text, selected draft or excerpt, and up to four recent turns from the current chat and workflow can be sent to the API. By default, active session narration and focused app identity can be sent too. Turn off that scope in **Setup**. Microphone audio stays local, and the API key is stored separately in the desktop wallet.
 
 ### Look at any shareable window
 
@@ -72,9 +65,9 @@ Install the KDE portal and GStreamer capture packages once:
 sudo dnf install xdg-desktop-portal-kde gstreamer1 gstreamer1-plugins-good pipewire-gstreamer
 ```
 
-Say “Look at this window and explain what’s on screen,” or click **View window**. Choose the app or game in the desktop share picker. The assistant analyzes one frame and closes the window capture.
+Say “Look at this window and explain what’s on screen,” or choose **⋯ → Screen sharing → View a window**. Choose the app or game in the desktop share picker. The assistant analyzes one frame and closes the window capture.
 
-Use **View monitors** or say “Look at my screen” for fullscreen games or anything spanning multiple apps. Choose the displays you want to share. When an ordinary question needs visual context, the assistant can open the picker itself. It can then take fresh frames from the approved displays when needed for the rest of the listening session. The picker and capture availability depend on the compositor. Select **Stop monitor sharing**, say “Stop sharing,” or pause to revoke display access. Switching chats or profiles also revokes access.
+Use **⋯ → Screen sharing → View monitors** or say “Look at my screen” for fullscreen games or anything spanning multiple apps. Choose the displays you want to share. When an ordinary question needs visual context, the assistant can open the picker itself. It can then take fresh frames from the approved displays when needed for the rest of the listening session. The picker and capture availability depend on the compositor. Select **Stop monitor sharing**, say “Stop sharing,” or pause to revoke display access. Switching chats or profiles also revokes access.
 
 Choose a vision-capable OpenAI model such as `gpt-4.1-mini`, or a local vision model in Ollama. An OpenAI vision request sends the requested frames and question to OpenAI. Frames are kept in memory for the request and omitted from chat history. The KWin metadata script is optional for visual questions.
 

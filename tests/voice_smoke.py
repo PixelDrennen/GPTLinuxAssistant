@@ -133,7 +133,30 @@ def main():
     window.profile_picker.setCurrentIndex(window.profile_picker.findData("work"))
     assert window.history.chat.id == work_chat
     assert window.model.text() == "work-model"
+    initial_chat_geometry = window.journal.geometry()
+    window.settings.show()
+    app.processEvents()
+    assert window.journal.geometry() == initial_chat_geometry
+    window.settings.hide()
+
+    window.key_field.setText("test-wallet-key")
+    with patch("assistant_app.__main__.credentials.save_key") as save:
+        window.store_api_key()
+        settle()
+        save.assert_called_once_with("test-wallet-key")
+    assert window.current_provider == "openai"
+    assert not window.key_field.text()
     window.history.close()
+
+    restarted = Window(Session(), SimpleNamespace(vosk_model="", ollama_model=None, openai_model=None))
+    with patch("assistant_app.__main__.credentials.read_key", return_value="test-wallet-key"):
+        restarted.retrieve_api_key()
+        settle()
+    assert restarted.api_key == "test-wallet-key"
+    assert restarted.current_provider == "openai"
+    with open(restarted.profile_settings.fileName(), encoding="utf8") as config:
+        assert "test-wallet-key" not in config.read()
+    restarted.history.close()
     scratch.cleanup()
     print("Voice dashboard, clarification, window routing, playback isolation and voice approval passed.")
 

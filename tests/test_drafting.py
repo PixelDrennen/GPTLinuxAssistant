@@ -54,3 +54,11 @@ class DraftingTests(unittest.TestCase):
         call = opener.return_value.open.call_args.args[0]
         self.assertEqual("http://127.0.0.1:11434/api/generate", call.full_url)
         self.assertEqual(["ZnJhbWU="], json.loads(call.data)["images"])
+
+    @patch("assistant_app.drafting.loopback_opener")
+    def test_offline_ollama_explains_the_active_provider(self, opener):
+        from urllib.error import URLError
+        import errno
+        opener.return_value.open.side_effect = URLError(ConnectionRefusedError(errno.ECONNREFUSED, "refused"))
+        with self.assertRaisesRegex(ValueError, "Ollama is offline"):
+            complete("gemma4", "", "hello", {}, "general")

@@ -7,15 +7,16 @@ from PyQt5.QtWidgets import QWidget
 
 
 class VoiceMeter(QWidget):
-    def __init__(self, name, color):
+    def __init__(self, name, color, *, compact=False):
         super().__init__()
         self.setAccessibleName(name)
         self.color = QColor(color)
         self.samples = deque([0.0] * 32, maxlen=32)
-        self.setMinimumHeight(35)
+        self.height_hint = 15 if compact else 35
+        self.setMinimumHeight(self.height_hint)
 
     def sizeHint(self):
-        return QSize(200, 35)
+        return QSize(70, self.height_hint)
 
     def sample(self, amount):
         self.samples.append(amount)

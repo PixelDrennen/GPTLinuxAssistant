@@ -1,9 +1,10 @@
 """Structured replies from local Ollama or an explicitly selected OpenAI model."""
 from base64 import b64encode
+import errno
 from dataclasses import dataclass
 import json
 import re
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 from .ipc import loopback_opener
@@ -86,6 +87,10 @@ def complete(model, draft, request, context, workflow, *, api_key=None, image=No
     except HTTPError as error:
         service = "OpenAI" if api_key is not None else "Ollama"
         raise ValueError(f"{service} request failed (HTTP {error.code}).") from None
+    except URLError as error:
+        if api_key is None and getattr(error.reason, "errno", None) == errno.ECONNREFUSED:
+            raise ValueError("Ollama is offline. Start Ollama or select OpenAI in Settings.") from None
+        raise
     if api_key is not None:
         try:
             content = result["choices"][0]["message"]["content"]
