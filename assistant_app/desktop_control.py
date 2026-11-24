@@ -17,6 +17,7 @@ class Task:
     key: str
     cancel: Event = field(default_factory=Event)
     source: object = None
+    skill: object = None
     actions: list = field(default_factory=list)
     anchor: tuple | None = None
 
@@ -49,7 +50,7 @@ class DesktopControl(QObject):
         self.planned.connect(self.show_step)
         self.captured.connect(self.record_view)
 
-    def start(self, request):
+    def start(self, request, *, skill=None):
         if not self.window.session.active or not self.window.api_key:
             self.window.message("Start listening and save an OpenAI API key before using desktop control.")
             return
@@ -57,7 +58,7 @@ class DesktopControl(QObject):
             self.window.message("Finish or cancel the current task before starting desktop control.")
             return
         self.window.stop_monitor()
-        task = Task(request, self.window.api_key)
+        task = Task(request, self.window.api_key, skill=skill or self.window.skill_for(request))
         self.task = task
         self.window.log("Control", "Select one display and grant mouse and keyboard access. Screenshots go to OpenAI.")
         self.window.hide()
@@ -66,8 +67,14 @@ class DesktopControl(QObject):
     def set_source(self, task, source):
         if task is self.task:
             task.source = source
+            source.watch_closed(lambda: self.permission_revoked(task))
         else:
             source.close()
+
+    def permission_revoked(self, task):
+        if task is self.task:
+            self.stop(show=True)
+            self.window.log("Control", "KDE closed the desktop permission. The task was stopped.")
 
     def stop(self, *, show=False):
         if self.task:
@@ -111,7 +118,7 @@ class DesktopControl(QObject):
                 if task.cancel.is_set():
                     return
                 self.captured.emit(task, frame)
-                result = plan(frame, task.request, task.actions, task.key, task.anchor)
+                result = plan(frame, task.request, task.actions, task.key, task.anchor, skill=task.skill)
                 self.planned.emit(task, frame, result, "")
             except CaptureCanceled:
                 self.planned.emit(task, None, None, "Desktop control canceled.")

@@ -73,3 +73,11 @@ class DraftingTests(unittest.TestCase):
         self.assertIn("wait_for_view", request["format"]["required"])
         self.assertIn("silent follow-up check", request["system"])
         self.assertTrue(reply.wait_for_view)
+
+    @patch("assistant_app.drafting.loopback_opener")
+    def test_ambiguous_desktop_request_uses_confirmation_route(self, opener):
+        content = json.dumps({"draft": "", "question": "", "needs_control": True, "confirm_control": True})
+        opener.return_value.open.return_value = io.BytesIO(json.dumps({"response": content}).encode())
+        result = complete("local", "", "Can you make this video play?", {}, "general", may_control=True)
+        self.assertTrue(result.needs_control)
+        self.assertTrue(result.confirm_control)

@@ -99,10 +99,31 @@ class SharedSource:
     def __init__(self, bus, session, nodes):
         self.bus, self.session, self.nodes = bus, session, nodes
         self.closed = False
+        self.close_subscription = None
         self.lock = Lock()
+
+    def watch_closed(self, on_closed):
+        def closed(*_args):
+            with self.lock:
+                if self.closed:
+                    return
+                self.closed = True
+                self.unwatch_closed()
+            on_closed()
+
+        with self.lock:
+            if not self.closed and self.close_subscription is None:
+                self.close_subscription = self.bus.signal_subscribe(
+                    BUS_NAME, SESSION, "Closed", self.session, None, Gio.DBusSignalFlags.NONE, closed)
+
+    def unwatch_closed(self):
+        if self.close_subscription is not None:
+            self.bus.signal_unsubscribe(self.close_subscription)
+            self.close_subscription = None
 
     def close(self):
         with self.lock:
+            self.unwatch_closed()
             if not self.closed:
                 self.closed = True
                 close_object(self.bus, self.session, SESSION)

@@ -39,8 +39,8 @@ from .session import Session
 from .speech import Microphone
 from .speech_overlay import SpeechOverlay
 from .theme import STYLE
-from .tasks import next_task
-from . import credentials, updates
+from .tasks import desktop_request, is_capability_wording, next_task
+from . import awareness, credentials, skills, updates
 from .voice import Speaker
 from .window_view import CaptureCanceled, MONITOR, WINDOW, capture_frame, select_source
 
@@ -50,7 +50,7 @@ class Window(QMainWindow):
     viewed = pyqtSignal(object, object, str)
     view_captured = pyqtSignal(object, object)
     monitor_selected = pyqtSignal(object, object)
-    update_checked = pyqtSignal(object, str, bool)
+    update_checked = pyqtSignal(object, object, str, bool)
     update_installed = pyqtSignal(str)
     key_finished = pyqtSignal(str, str, bool)
 
@@ -62,6 +62,8 @@ class Window(QMainWindow):
         self.key_finished.connect(self.key_result)
         data_home = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
         self.data_dir = data_home / "gpt-linux-assistant"
+        self.skills_dir = self.data_dir / "skills"
+        self.skills, self.skill_errors = skills.discover(self.skills_dir)
         self.profile_settings = QSettings("PixelDrennen", "GPT Linux Assistant")
         self.cli_provider = bool(args.openai_model or args.ollama_model)
         self.profile = self.profile_settings.value("profile", "work")
@@ -70,6 +72,20 @@ class Window(QMainWindow):
         self.history = ChatStore(self.data_dir / self.profile)
         self.update_busy = False
         self.update_offered = None
+        self.update_status = "not checked"
+        self.update_revision = None
+        self.update_changes = []
+        self.update_last_checked = None
+        self.update_error = ""
+        self.last_screen_capture = None
+        self.installed_revision = updates.installed()
+        previous = self.profile_settings.value("lastLaunchRevision", "")
+        self.release_baseline = self.profile_settings.value("releaseBaseline", "")
+        if self.installed_revision and previous != self.installed_revision:
+            self.release_baseline = previous
+            self.profile_settings.setValue("releaseBaseline", previous)
+            self.profile_settings.setValue("lastLaunchRevision", self.installed_revision)
+        self.installed_changes = updates.installed_changes(self.installed_revision, self.release_baseline)
         self.update_checked.connect(self.offer_update)
         self.update_installed.connect(self.finish_update)
         self.history_error = False
@@ -95,6 +111,7 @@ class Window(QMainWindow):
         self.voice_approval = None
         self.clarification = None
         self.waiting_for_share = None
+        self.pending_control = None
         self.last_status = ""
         self.last_focus = ""
         self.last_reply = ""
@@ -103,6 +120,7 @@ class Window(QMainWindow):
         self.view_captured.connect(self.record_view)
         self.view_job = None
         self.watch_request = None
+        self.watch_skill = None
         self.watch_timer = QTimer(self)
         self.watch_timer.setInterval(5000)
         self.watch_timer.timeout.connect(self.check_watch)
@@ -191,6 +209,8 @@ class Window(QMainWindow):
         control.addAction("Stop task", self.stop_desktop_control)
         self.controls.addAction("Manual request…", lambda: self.manual.show())
         self.controls.addAction("Settings…", lambda: self.settings.show())
+        self.controls.addAction("Skills…", self.show_skills)
+        self.controls.addAction("App status…", self.show_app_status)
         self.controls.addAction("Check for updates", lambda: self.check_updates(manual=True))
 
         root = QWidget()
@@ -522,6 +542,7 @@ class Window(QMainWindow):
             self.last_status = "Listening"
 
     def pause(self):
+        self.pending_control = None
         self.desktop_control.stop(show=bool(self.desktop_control.task))
         self.stop_monitor()
         self.audio.stop()
@@ -570,6 +591,7 @@ class Window(QMainWindow):
         self.output.clear()
 
     def switch_provider(self):
+        self.pending_control = None
         self.stop_desktop_control()
         self.stop_monitor()
         self.models[self.current_provider] = self.model.text()
@@ -661,21 +683,98 @@ class Window(QMainWindow):
         if was_active:
             self.start()
 
+    def app_state(self):
+        with self.session.lock:
+            active = self.session.active
+            bridge_states = {kind: {"enabled": kind in self.session.bridges,
+                                    "target_shared": kind in self.session.targets}
+                             for kind in ("rider", "unity")}
+            approval_pending = self.session.proposal is not None
+        task = self.desktop_control.task
+        phase = ("awaiting input approval" if self.desktop_control.pending else
+                 "working on a step" if task and task.source else
+                 "awaiting KDE permission" if task else "idle")
+        activity = ("Paused" if not active else "Speaking" if self.speaking else
+                    "Transcribing" if self.audio_status == "Transcribing speech" else
+                    "Listening")
+        return {
+            "profile": self.profile,
+            "activity": activity,
+            "microphone": {"enabled": self.mic.isChecked(), "status": self.audio_status,
+                           "transcription": "OpenAI" if self.cloud_transcription.isChecked() else "Vosk",
+                           "wait_after_speech_seconds": self.thinking_pause.value()},
+            "replies": {"provider": self.current_provider, "model": self.model.text().strip(),
+                        "voice_enabled": self.spoken.isChecked(), "voice": self.cloud_voice() or "local eSpeak"},
+            "screen": {"monitor_granted": self.shared_monitor is not None, "watching": bool(self.watch_request),
+                       "capture_in_progress": self.view_job is not None,
+                       "last_model_view": self.last_screen_capture},
+            "desktop_control": {"phase": phase, "permission_granted": bool(task and task.source),
+                                "openai_key_configured": bool(self.api_key),
+                                "awaiting_request_confirmation": bool(
+                                    self.pending_control and self.pending_control[1] > self.session.clock()),
+                                "supported_inputs": ["click", "scroll", "drag", "type", "keypress"],
+                                "requires_review": True},
+            "editor_bridges": bridge_states,
+            "approval_pending": approval_pending or self.desktop_control.pending is not None,
+            "skills": sorted(self.skills),
+            "waiting_for_editor_share": self.waiting_for_share[0] if self.waiting_for_share else None,
+            "release": {"revision": self.installed_revision[:8] if self.installed_revision else None,
+                        "since_previous": bool(self.release_baseline), "changes": self.installed_changes},
+            "updates": {"status": self.update_status, "last_checked": self.update_last_checked,
+                        "revision": self.update_revision[:8] if self.update_revision else None,
+                        "changes": self.update_changes, "error": self.update_error},
+        }
+
+    def skill_list(self):
+        self.skills, self.skill_errors = skills.discover(self.skills_dir)
+        if not self.skills:
+            return "There are no skills available."
+        return "Available skills\n" + "\n".join(
+            f"• {skill.name}: {skill.description}" for skill in self.skills.values())
+
+    def show_skills(self):
+        text = self.skill_list() + f"\n\nAdd your own <name>/SKILL.md under {self.skills_dir}."
+        if self.skill_errors:
+            text += "\n\n" + "\n".join(self.skill_errors)
+        prompt = QMessageBox(QMessageBox.Information, "Skills", text, QMessageBox.Ok, self)
+        prompt.setTextFormat(Qt.PlainText)
+        prompt.exec_()
+
+    def skill_for(self, request):
+        return skills.match(self.skills, request)[0]
+
+    def show_app_status(self):
+        state = self.app_state()
+        text = awareness.status_answer(state)
+        details = "\n\n".join((awareness.capabilities_answer(state), awareness.changes_answer(state)))
+        prompt = QMessageBox(QMessageBox.Information, "App status", text, QMessageBox.Ok, self)
+        prompt.setTextFormat(Qt.PlainText)
+        prompt.setDetailedText(details)
+        prompt.exec_()
+
     def check_updates(self, manual=False):
         if self.update_busy:
             return
         self.update_busy = True
+        self.update_status = "checking"
 
         def check():
             try:
-                self.update_checked.emit(updates.check(), "", manual)
+                revision = updates.check()
+                notes = updates.available_changes(revision, self.installed_revision)
+                self.update_checked.emit(revision, notes, "", manual)
             except (OSError, subprocess.SubprocessError, IndexError):
-                self.update_checked.emit(None, "Could not check for updates.", manual)
+                self.update_checked.emit(None, [], "Could not check for updates.", manual)
 
         Thread(target=check, daemon=True).start()
 
-    def offer_update(self, revision, error, manual):
+    def offer_update(self, revision, notes, error, manual):
         self.update_busy = False
+        self.update_revision = revision
+        self.update_changes = notes
+        self.update_last_checked = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.update_error = error
+        self.update_status = "error" if error else "available" if revision else "current"
         if not revision:
             if manual:
                 QMessageBox.information(self, "Updates", error or "No newer version is available for this checkout.")
@@ -684,8 +783,11 @@ class Window(QMainWindow):
             return
         self.update_offered = revision
         prompt = QMessageBox(QMessageBox.Information, "Update available",
-                             "A new version of GPT Linux Assistant is available.",
+                             f"GPT Linux Assistant update {revision[:8]} is available.",
                              QMessageBox.NoButton, self)
+        prompt.setTextFormat(Qt.PlainText)
+        if notes:
+            prompt.setDetailedText(awareness.change_lines(notes))
         install = prompt.addButton("Update and restart", QMessageBox.AcceptRole)
         prompt.addButton("Later", QMessageBox.RejectRole)
         prompt.exec_()
@@ -693,6 +795,7 @@ class Window(QMainWindow):
             return
         self.pause()
         self.update_busy = True
+        self.update_status = "installing"
 
         def apply():
             try:
@@ -706,6 +809,8 @@ class Window(QMainWindow):
     def finish_update(self, error):
         self.update_busy = False
         if error:
+            self.update_status = "error"
+            self.update_error = error
             QMessageBox.warning(self, "Update could not be installed", error)
         else:
             QApplication.instance().exit(updates.RESTART)
@@ -726,6 +831,7 @@ class Window(QMainWindow):
     def load_chat(self):
         chat = self.history.chat
         self.chat_title.setText(chat.title)
+        self.last_screen_capture = None
         self.journal.snapshots.clear()
         self.journal.set_entries("".join(self.entry_html(*entry) for entry in chat.entries))
         self.chat_list.blockSignals(True)
@@ -791,6 +897,7 @@ class Window(QMainWindow):
             self.history_timer.start()
 
     def record_frames(self, label, frames):
+        self.last_screen_capture = {"source": label, "at": datetime.now().astimezone().isoformat(timespec="seconds")}
         attachments = self.journal.encode_frames(frames)
         if attachments:
             self.log("Screen", label, attachments)
@@ -1022,14 +1129,60 @@ class Window(QMainWindow):
             self.desktop_control.start(request.strip())
 
     def stop_desktop_control(self):
+        self.pending_control = None
         if self.desktop_control.task:
             self.desktop_control.stop(show=True)
             self.log("Control", "Desktop task stopped.")
+
+    def route_desktop_task(self, request, *, confirm=False, spoken=True, skill=None):
+        if confirm:
+            if not self.api_key:
+                self.answer("I can do that through desktop control once you save an OpenAI API key in Settings.", spoken)
+                return
+            self.pending_control = request, self.session.clock() + 60, skill
+            reply = ("I can try that using desktop control. KDE may ask you to share a display, "
+                     "and you’ll review the input before it runs. Do you want me to go ahead?")
+            self.answer(reply, spoken)
+        elif skill:
+            self.desktop_control.start(request, skill=skill)
+        else:
+            self.desktop_control.start(request)
+
+    def handle_desktop_confirmation(self, words, spoken):
+        pending, self.pending_control = self.pending_control, None
+        if not pending or pending[1] <= self.session.clock():
+            return False
+        if words in ("yes", "yes please", "yes go ahead", "go ahead", "please do", "do it"):
+            self.route_desktop_task(pending[0], spoken=spoken, skill=pending[2])
+            return True
+        if words in ("no", "no thanks", "no thank you", "not now", "don t", "don t do it"):
+            self.answer("Okay. I’ll leave it as it is.", spoken)
+            return True
+        return False
 
     def ask(self, *, voice_request=None):
         voice = voice_request is not None
         request = voice_request.strip()[:1500] if voice else self.request.text().strip()
         words = " ".join(re.findall(r"[a-z0-9]+", request.casefold()))
+        question = awareness.question_kind(words)
+        if question:
+            if question == "check":
+                self.check_updates(manual=True)
+            else:
+                state = self.app_state()
+                reply = {"status": awareness.status_answer, "capabilities": awareness.capabilities_answer,
+                         "changes": awareness.changes_answer, "updates": awareness.update_answer,
+                         "permissions": awareness.permissions_answer,
+                         "skills": lambda _state: self.skill_list()}[question](state)
+                if self.session.active and voice:
+                    self.say(reply)
+                elif self.session.active:
+                    self.log("Assistant", reply)
+                else:
+                    prompt = QMessageBox(QMessageBox.Information, "App status", reply, QMessageBox.Ok, self)
+                    prompt.setTextFormat(Qt.PlainText)
+                    prompt.exec_()
+            return
         if voice and words in ("pause", "stop listening", "pause listening"):
             self.pause()
             return
@@ -1059,16 +1212,20 @@ class Window(QMainWindow):
             else:
                 self.say("Okay. What would you like to do next?")
             return
-        desktop_request = re.match(
-            r"^(?:please |can you |could you )?(?:use (?:my |the )?computer to|control (?:my |the )?desktop to)\s+(.+)",
-            request, re.IGNORECASE)
-        if desktop_request:
-            self.desktop_control.start(desktop_request[1])
+        if self.handle_desktop_confirmation(words, voice):
             return
-        direct_input = re.match(r"^(?:please |can you |could you )?(?:click|double[- ]click|right[- ]click|scroll|drag|press|type)\s+",
-                                request, re.IGNORECASE)
-        if direct_input:
-            self.desktop_control.start(request)
+        self.skills, self.skill_errors = skills.discover(self.skills_dir)
+        skill, clean_request = skills.match(self.skills, request)
+        if skills.INVOCATION.match(request) and not skill:
+            self.answer("That skill isn’t installed. Say what skills are available to see the list.", voice)
+            return
+        if skill and not clean_request:
+            self.answer(f"What would you like to do with {skill.name}?", voice)
+            return
+        request = clean_request
+        computer_task = desktop_request(request)
+        if computer_task:
+            self.route_desktop_task(computer_task, confirm=is_capability_wording(request), spoken=voice, skill=skill)
             return
         if self.desktop_control.task:
             self.log("Control", "Review the desktop input or say stop desktop control.")
@@ -1107,7 +1264,12 @@ class Window(QMainWindow):
             return
         visual = re.match(r"^(?:please |can you |could you )?look at (?:this |the |my |a )?(window|screen|game)\b", request, re.IGNORECASE)
         if visual:
-            self.look_at_window(request, MONITOR if visual[1].casefold() == "screen" else WINDOW)
+            self.look_at_window(request, MONITOR if visual[1].casefold() == "screen" else WINDOW, skill=skill)
+            return
+        capture = re.match(r"^(?:please |can you |could you )?(?:take|capture) (?:a )?screenshot\b", request, re.IGNORECASE)
+        if capture:
+            source = WINDOW if re.search(r"\b(window|app)\b", words) else MONITOR
+            self.look_at_window(request, source, skill=skill)
             return
         if self.model_job or self.view_job:
             self.answer("A reply is already being prepared.", voice)
@@ -1166,7 +1328,9 @@ class Window(QMainWindow):
         if len(original) > 16000:
             self.answer("Share a shorter excerpt, up to 16,000 characters.", voice)
             return
-        context = {"profile": self.profile}
+        context = {"profile": self.profile, "app_state": self.app_state()}
+        if skill:
+            context["selected_skill"] = skill.context()
         if self.include_narration.isChecked():
             context.update(narration=narration[-5:], focused_app=focus)
         chat = self.history.chat
@@ -1175,7 +1339,7 @@ class Window(QMainWindow):
         if history:
             context["previous_turns"] = [[request[:1200], reply[:1600]] for request, reply in history]
         job = (epoch, kind, target, self.output.toPlainText(), self.request.text(),
-               self.input.toPlainText(), voice, request, model)
+               self.input.toPlainText(), voice, request, model, skill)
         self.model_job = job
         self.message("Preparing a reply.")
 
@@ -1183,7 +1347,8 @@ class Window(QMainWindow):
 
         def generate():
             try:
-                result = complete(model, original, request, context, kind, api_key=api_key, may_view=may_view)
+                result = complete(model, original, request, context, kind, api_key=api_key, may_view=may_view,
+                                  may_control=kind != "rider")
                 self.drafted.emit(job, result, "")
             except (OSError, ValueError) as exc:
                 self.drafted.emit(job, None, str(exc))
@@ -1196,6 +1361,7 @@ class Window(QMainWindow):
             self.view_job = None
 
     def discard_task(self):
+        self.pending_control = None
         self.stop_desktop_control()
         self.stop_watch()
         self.cancel_view()
@@ -1222,6 +1388,7 @@ class Window(QMainWindow):
 
     def stop_watch(self):
         self.watch_request = None
+        self.watch_skill = None
         self.watch_timer.stop()
         self.stop_watch_button.setVisible(False)
         if self.view_job and self.view_job[5]:
@@ -1233,7 +1400,7 @@ class Window(QMainWindow):
         elif not (self.speaking or self.model_job or self.view_job or self.mode
                   or self.session.proposal or self.session.command or self.user_speaking
                   or self.audio_status == "Transcribing speech"):
-            self.look_at_window(self.watch_request, MONITOR, rechecking=True)
+            self.look_at_window(self.watch_request, MONITOR, rechecking=True, skill=self.watch_skill)
 
     def stop_monitor(self):
         self.stop_watch()
@@ -1247,12 +1414,17 @@ class Window(QMainWindow):
     def on_monitor_selected(self, job, monitor):
         if self.view_job is job and self.session.active and not job[0].is_set():
             self.shared_monitor = monitor
+            monitor.watch_closed(lambda: self.monitor_revoked(monitor))
             self.stop_monitor_button.setVisible(True)
             self.log("Screen", "Selected monitors are available for on-demand frames during this session.")
         else:
             monitor.close()
 
-    def look_at_window(self, request=None, source=WINDOW, *, rechecking=False):
+    def monitor_revoked(self, monitor):
+        if self.shared_monitor is monitor:
+            self.stop_monitor()
+
+    def look_at_window(self, request=None, source=WINDOW, *, rechecking=False, skill=None):
         if self.desktop_control.task:
             self.message("Finish the desktop task before opening another screen capture.")
             return
@@ -1291,8 +1463,11 @@ class Window(QMainWindow):
             self.message(f"Choose monitors for this session. Requested frames go to {destination}.")
         else:
             self.message(f"Choose a {target} to share one frame with {destination}.")
-        profile = self.profile
-        job = (Event(), self.session.epoch, model, request, source, rechecking)
+        context = {"profile": self.profile, "app_state": self.app_state()}
+        skill = skill or self.skill_for(request)
+        if skill:
+            context["selected_skill"] = skill.context()
+        job = (Event(), self.session.epoch, model, request, source, rechecking, skill)
         self.view_job = job
         cancel = job[0]
 
@@ -1310,7 +1485,7 @@ class Window(QMainWindow):
                 if cancel.is_set():
                     return
                 self.view_captured.emit(job, frame)
-                result = complete(model, "", request, {"profile": profile}, "general", api_key=api_key, image=frame,
+                result = complete(model, "", request, context, "general", api_key=api_key, image=frame,
                                   may_wait=source == MONITOR, rechecking=rechecking)
                 self.viewed.emit(job, result, "")
             except CaptureCanceled:
@@ -1337,6 +1512,7 @@ class Window(QMainWindow):
         elif result.wait_for_view and self.shared_monitor:
             if not job[5]:
                 self.watch_request = job[3]
+                self.watch_skill = job[6]
                 self.watch_timer.start()
                 self.stop_watch_button.setVisible(True)
                 self.log("Screen", "Waiting for the requested view. Say stop watching to end the checks.")
@@ -1358,7 +1534,7 @@ class Window(QMainWindow):
         if self.model_job is not job:
             return
         self.model_job = None
-        epoch, kind, target, original_output, typed_request, original_context, voice, request, model = job
+        epoch, kind, target, original_output, typed_request, original_context, voice, request, model, skill = job
         with self.session.lock:
             self.session.expire()
             changed = (epoch != self.session.epoch or self.workflow.currentData() != kind or
@@ -1375,9 +1551,13 @@ class Window(QMainWindow):
                 self.say(error if error.startswith("Ollama is offline.") else
                          "The model request failed. Check the chat for details.")
             return
+        if result.needs_control:
+            self.route_desktop_task(request, confirm=result.confirm_control or is_capability_wording(request),
+                                    spoken=voice, skill=skill)
+            return
         if result.needs_view:
             if self.auto_view.isChecked():
-                self.look_at_window(request, MONITOR)
+                self.look_at_window(request, MONITOR, skill=skill)
             else:
                 self.answer("Use View monitors to share the screen for this question.", voice)
             return

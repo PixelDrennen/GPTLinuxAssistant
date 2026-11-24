@@ -31,7 +31,13 @@ class UpdatesTests(unittest.TestCase):
             git(origin, "commit", "-am", "Second")
 
             with patch.object(updates, "ROOT", checkout), patch.object(updates, "REPOSITORY", str(origin)):
+                initial_revision = updates.installed()
                 available = updates.check()
+                self.assertEqual(["First"], [note["summary"] for note in
+                                            updates.installed_changes(initial_revision, None)])
+                self.assertEqual(["Second"], [note["summary"] for note in
+                                             updates.available_changes(available, initial_revision)])
+                self.assertEqual(initial_revision, updates.installed())
                 local = checkout / "version"
                 local.write_text("local changes")
                 with self.assertRaisesRegex(ValueError, "local changes"):
@@ -41,3 +47,5 @@ class UpdatesTests(unittest.TestCase):
                 updates.install(available)
                 self.assertEqual("two", local.read_text())
                 self.assertIsNone(updates.check())
+                self.assertEqual(["Second"], [note["summary"] for note in
+                                             updates.installed_changes(updates.installed(), initial_revision)])

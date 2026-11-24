@@ -62,18 +62,39 @@ def main():
         window.spoken.setChecked(False)
         source.frame.return_value = frame
         click = parse_action(SimpleNamespace(type="click", button="left", x=30, y=40, keys=[]), 250, 200)
+        with patch.object(window.desktop_control, "start") as start:
+            window.ask(voice_request="Are you able to hit play on this video for me?")
+            assert "Do you want me to go ahead?" in window.journal.toPlainText()
+            window.ask(voice_request="Do you permission already?")
+            assert "Keyboard and pointer access haven’t been granted" in window.journal.toPlainText()
+            start.assert_not_called()
+            window.ask(voice_request="Yes")
+            assert start.call_args.args == ("Are you able to hit play on this video for me?",)
+            assert start.call_args.kwargs["skill"].name == "desktop-navigation"
+            start.reset_mock()
+            window.ask(voice_request="Are you able to hit play on this video for me?")
+            window.ask(voice_request="No")
+            start.assert_not_called()
+            window.ask(voice_request="Go ahead and hit play on this video for me.")
+            assert start.call_args.args == ("Go ahead and hit play on this video for me.",)
+            assert start.call_args.kwargs["skill"].name == "desktop-navigation"
+
         with patch("assistant_app.desktop_control.select_source", return_value=source), \
                 patch("assistant_app.desktop_control.plan", side_effect=[click, "The Accounting tab is open."]):
             window.ask(voice_request="Use my computer to open Accounting")
             settle()
             assert window.desktop_control.pending[0] == click
             assert window.desktop_control.dialog.isVisible()
+            assert window.app_state()["desktop_control"]["permission_granted"]
+            assert window.app_state()["desktop_control"]["phase"] == "awaiting input approval"
             source.notify.assert_not_called()
             window.desktop_control.approve()
             settle(1050)
             source.notify.assert_called()
             source.close.assert_called_once()
             assert window.last_reply == "The Accounting tab is open."
+            assert not window.app_state()["desktop_control"]["permission_granted"]
+            assert window.app_state()["screen"]["last_model_view"]
             assert len(window.journal.snapshots) == 2
             window.save_chat()
             window.load_chat()

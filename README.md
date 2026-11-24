@@ -81,6 +81,8 @@ Choose a vision-capable OpenAI model such as `gpt-4.1-mini`, or a local vision m
 
 While listening, say “Use my computer to click the Accounting tab in TradeSkillMaster,” or open **⋯ → Desktop control → Start task**. Select one monitor and grant keyboard and pointer access in KDE’s Remote Desktop prompt. Desktop control uses the OpenAI computer-use tool and sends screenshots to OpenAI, independently of the text reply provider.
 
+You can also say “go ahead and hit play on this video.” If a request sounds like a question about whether the app can do something, it explains the next step and asks if you want to proceed. “Yes” starts the task, and the input still needs review. Ask “what permissions do you have?” to distinguish viewing from control.
+
 Each step shows the selected display and the proposed input. Review it and click **Send this input**. You can approve clicks, scrolls, drags, shortcuts, or typed text. Keyboard input needs an approved click on the intended field first. If the target area changes while you’re reviewing, the input is skipped. Say “stop desktop control,” use the tray stop action, or pause to close the session.
 
 When the assistant speaks, a small movable overlay shows the spoken line and pulses with the voice level. Drag it by its body. Wayland window placement is managed by the compositor.
@@ -89,9 +91,15 @@ When the assistant speaks, a small movable overlay shows the spoken line and pul
 
 Use **Work** or **Play** in the sidebar. Each has its own settings, chat list, and model context. **New chat** starts a fresh thread. Unselected chat history is compressed in the local SQLite database and automatically decompressed when opened. History includes transcript, replies, and activity text. Use the sidebar to resume a chat with its prior turns. Files are stored under `~/.local/share/gpt-linux-assistant/work/` and `play/` by default. Compression saves space. The history files use local filesystem permissions.
 
+### Skills
+
+Open **⋯ → Skills** or ask “what skills are available?” The bundled skills adapt [OpenAI’s screenshot skill](https://github.com/openai/skills/tree/main/skills/.curated/screenshot) and [Vercel Labs’ agent-desktop skill](https://github.com/vercel-labs/agent-desktop/tree/main/skills/agent-desktop) to this app. They match common requests automatically. You can also write `@screenshot take a screenshot of my window` or say “use the desktop navigation skill to open this menu.”
+
+To add a skill, put its `SKILL.md` in `~/.local/share/gpt-linux-assistant/skills/<name>/`. Use the skill folder name as the frontmatter `name` and include a `description`. Add a comma-separated `metadata.linux-assistant-triggers` string to match requests automatically. Full YAML frontmatter uses PyYAML, which you can install with `.venv/bin/python -m pip install PyYAML`. Built-in skills need no extra package. Selected Markdown instructions are sent to the model used for the task. The app applies the instructions as guidance within its existing input review and permissions.
+
 ### Updates
 
-For a checkout cloned from GitHub, the app checks at launch and periodically while it is open. Choose **Update and restart** in the popup to install an available fast-forward update. The tray also has **Check for updates**. Updates preserve chat history and settings and stop if the source checkout has local changes. To get the version that adds the popup, update your existing checkout once with `git pull --ff-only`.
+Ask “what changed in the last update?” or open **⋯ → App status** for the installed revision, recent changes, and current capabilities. For a checkout cloned from GitHub, the app checks at launch and periodically while it is open. Choose **Update and restart** in the popup to install an available fast-forward update. The tray also has **Check for updates**. Updates preserve chat history and settings and stop if the source checkout has local changes. To get the version that adds the popup, update your existing checkout once with `git pull --ff-only`.
 
 ### Rider
 
