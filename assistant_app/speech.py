@@ -3,11 +3,15 @@ import json
 import subprocess
 from threading import Event, Lock, Thread
 
+from .voice import level
+
 from PyQt5.QtCore import QObject, pyqtSignal
 
 
 class Microphone(QObject):
     ready = pyqtSignal(int)
+    meter = pyqtSignal(int, float)
+    partial = pyqtSignal(int, str)
     heard = pyqtSignal(int, str, float)
     failed = pyqtSignal(int, str)
 
@@ -58,6 +62,7 @@ class Microphone(QObject):
                 self.process = process
             try:
                 ready = False
+                last_partial = ""
                 while not cancel.is_set():
                     audio = process.stdout.read(3200)
                     if not audio:
@@ -67,11 +72,20 @@ class Microphone(QObject):
                     if not ready and not cancel.is_set():
                         self.ready.emit(generation)
                         ready = True
+                    self.meter.emit(generation, level(audio))
                     if recognizer.AcceptWaveform(audio):
+                        if last_partial:
+                            last_partial = ""
+                            self.partial.emit(generation, "")
                         result = json.loads(recognizer.Result())
                         if result.get("text") and not cancel.is_set():
                             confidence = min((word["conf"] for word in result.get("result", [])), default=0.0)
                             self.heard.emit(generation, result["text"], confidence)
+                    else:
+                        partial = json.loads(recognizer.PartialResult()).get("partial", "")
+                        if partial != last_partial:
+                            last_partial = partial
+                            self.partial.emit(generation, partial)
             finally:
                 if process.poll() is None:
                     process.terminate()

@@ -1,8 +1,8 @@
 # GPT Linux Assistant
 
-A tray assistant for Fedora KDE Plasma 6 on Wayland. Start a listening session, enable the context sources you want, and talk through your work. Every edit, clipboard copy, and browser launch initiated by the assistant needs a one-use approval.
+A voice-first tray assistant for Fedora KDE Plasma 6 on Wayland. Start a listening session and speak while you work. The dashboard shows both voice signals, live recognition, and a running activity log. Every edit, clipboard copy, and browser launch initiated by the assistant needs a one-use approval.
 
-| App | What v0.1 can do |
+| App | What it can do |
 | --- | --- |
 | Unity | Offer a handoff when your narration and open apps indicate dialogue wiring. Preview and fill one empty component reference in the open prefab after you explicitly share the source, field, and destination. |
 | Rider | Complete a selected prompt in an editor document or scratch file, including unsaved text. Preview the full replacement and apply it as one undoable edit. |
@@ -13,13 +13,13 @@ A tray assistant for Fedora KDE Plasma 6 on Wayland. Start a listening session, 
 ## Run on Fedora
 
 ```bash
-sudo dnf install python3-qt5 python3-gobject qt5-qtwayland pipewire-utils
+sudo dnf install python3-qt5 python3-gobject qt5-qtwayland pipewire-utils espeak-ng
 git clone https://github.com/PixelDrennen/GPTLinuxAssistant.git
 cd GPTLinuxAssistant
 /usr/bin/python3 -m assistant_app
 ```
 
-The app launches paused with all observation sources and editor bridges off. **Start listening** starts the session. Use **Pause** or the tray menu to clear the session and revoke pending approvals. The KDE screen-lock signal also pauses collection. Unlocking leaves it paused.
+The app launches paused. A configured Vosk model enables the microphone when you select **Start listening**. Window context and editor bridges have separate opt-ins under **Setup**. Use **Pause**, the tray menu, or “Assistant, pause” to clear the in-memory log and revoke pending approvals. The KDE screen-lock signal also pauses collection. Unlocking leaves it paused.
 
 ### Window context
 
@@ -29,11 +29,40 @@ kpackagetool6 --type=KWin/Script --install ./kwin
 
 Enable **GPT Linux Assistant** in System Settings → Window Management → KWin Scripts. In the assistant, enable **Use KWin app identities**, then switch focus once. The panel shows application IDs. Enter exact application IDs in the exclusion box to drop them from the working context. The KWin script shares app identity and a PID for process-name fallback. It does not capture pixels, titles, browser tabs, or keystrokes.
 
-### Voice and drafting
+### Set up voice once
 
-- For local speech recognition, create a virtual environment with `/usr/bin/python3 -m venv --system-site-packages .venv`, install with `.venv/bin/python -m pip install vosk`, and download and extract an English model from the [Vosk model catalog](https://alphacephei.com/vosk/models). Launch with `.venv/bin/python -m assistant_app --vosk-model /path/to/extracted/model` and turn on **Use microphone (Vosk)**.
-- Narrate normally to give the assistant context. Use **Ask by voice** or start a request with “Assistant” to address it directly. When a preview is visible, click **Answer by voice** and say “yes” or “no,” or use the approval buttons. A “yes” in regular narration cannot approve anything. Unity, Slack, and browser offers use recent narration and open app identities. Quiet mode suppresses proactive offers.
-- For generated drafts, run [Ollama](https://ollama.com/) with a downloaded local model and cloud features disabled (`OLLAMA_NO_CLOUD=1` in the Ollama server environment). Enter the model name in the app and tell it what to draft. The app sends the requested text to Ollama on loopback and includes recent narration only if you enable that option. If you prefer to skip model setup, type the replacement directly in **Draft** and use the preview button.
+1. Create a virtual environment with `/usr/bin/python3 -m venv --system-site-packages .venv` and run `.venv/bin/python -m pip install vosk`.
+2. Download and extract a small English model from the [Vosk model catalog](https://alphacephei.com/vosk/models). Put the extracted model directory at `~/.local/share/gpt-linux-assistant/vosk-model`, or pass its path with `--vosk-model`.
+3. Choose a model for conversation and drafting.
+
+   - **OpenAI API.** Launch with the API key in your environment. The prompt below accepts it without displaying it or putting the key itself into shell history.
+
+     ```bash
+     read -rsp 'OpenAI API key: ' OPENAI_API_KEY
+     printf '\n'
+     export OPENAI_API_KEY
+     .venv/bin/python -m assistant_app --openai-model gpt-4.1-mini
+     ```
+
+   - **Local Ollama.** Run [Ollama](https://ollama.com/) with a downloaded local model and cloud features disabled (`OLLAMA_NO_CLOUD=1` in the Ollama server environment). Launch with `.venv/bin/python -m assistant_app --ollama-model YOUR_MODEL`.
+
+### Work by voice
+
+Select **Start listening** once. Narrate normally to provide context. Start a request or a follow-up answer with “Assistant.”
+
+| Say | What happens |
+| --- | --- |
+| “Assistant, what am I working on?” | Hear the current local task summary. |
+| “Assistant, finish this prompt in Rider.” | Hear what to share if a draft is missing. Sharing a selection within 90 seconds resumes the request automatically. |
+| “Assistant, help me connect this Unity prefab.” | Share a prefab reference from Unity, then review the proposed connection. |
+| “Assistant, write a Slack update about the prefab changes.” | Hear the draft or a clarifying question. Answer by starting with “Assistant.” |
+| “Assistant, copy that.” | Review the proposed clipboard copy. |
+| “Assistant approve” or “Assistant decline” | Respond to the single visible approval preview after the announcement ends. |
+| “Assistant, repeat that” or “Assistant, pause” | Replay the last model reply or stop the session. |
+
+The microphone and assistant meters use microphone audio and the assistant's local playback signal. Transcription uses Vosk, and spoken replies use eSpeak NG through PipeWire. The microphone pauses while the assistant speaks so playback cannot be treated as a request or approval. Wait for the microphone indicator to resume before talking. **Quiet mode** suppresses unsolicited suggestions, and **Speak replies** can mute audio. **Manual controls** exposes text inputs and preview controls when useful.
+
+When you choose OpenAI, the request text, selected draft or excerpt, and the previous turn in the same voice workflow can be sent to the API. The separate narration checkbox also allows sending recent narration and focused app identity. Microphone audio stays local, and the app uses the API key from the environment without saving it.
 
 ### Rider
 
@@ -65,6 +94,7 @@ The broker exposes no shell or generic input control. Ollama receives text and r
 ```bash
 python3 -m unittest discover -s tests -v
 node --check kwin/contents/code/main.js
+QT_QPA_PLATFORM=offscreen PYTHONPATH=. /usr/bin/python3 tests/voice_smoke.py
 ```
 
 For a desktop smoke test, deny an edit and verify that the target remains untouched, approve it and use Undo, then change the target during a preview and verify that approval is rejected. Test screen lock and resume on the target Plasma session.

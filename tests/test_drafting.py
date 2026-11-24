@@ -24,3 +24,17 @@ class DraftingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             complete("model:120b-cloud", "private", "draft", [], "slack")
         opener.assert_not_called()
+
+    @patch("assistant_app.drafting.loopback_opener")
+    def test_openai_uses_explicit_key_and_structured_https_request(self, opener):
+        opener.return_value.open.return_value = io.BytesIO(json.dumps({
+            "choices": [{"message": {"content": json.dumps({"draft": "Try Prefab Mode.", "question": ""})}}],
+        }).encode())
+        result = complete("gpt-4.1-mini", "", "How do I edit a prefab?", {}, "general", api_key="test-key")
+        call = opener.return_value.open.call_args.args[0]
+        payload = json.loads(call.data)
+        self.assertEqual("https://api.openai.com/v1/chat/completions", call.full_url)
+        self.assertEqual("Bearer test-key", call.get_header("Authorization"))
+        self.assertFalse(payload["store"])
+        self.assertTrue(payload["response_format"]["json_schema"]["strict"])
+        self.assertEqual("Try Prefab Mode.", result.draft)
