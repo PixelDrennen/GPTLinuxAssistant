@@ -1,6 +1,8 @@
 """Run on Qt offscreen with real widgets and simulated microphone/model results."""
+import os
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PyQt5.QtCore import QEventLoop, QTimer
 from PyQt5.QtWidgets import QApplication
@@ -17,9 +19,14 @@ def settle():
 
 
 def main():
+    scratch = TemporaryDirectory()
+    os.environ["XDG_DATA_HOME"] = scratch.name
+    os.environ["XDG_CONFIG_HOME"] = scratch.name
     app = QApplication([])
     session = Session()
     window = Window(session, SimpleNamespace(vosk_model="", ollama_model="test-model", openai_model=None))
+    assert window.auto_view.isChecked() and window.window_access.isChecked()
+    assert window.rider.isChecked() and window.unity.isChecked()
     window.spoken.setChecked(False)
     window.show()
     app.processEvents()
@@ -66,6 +73,26 @@ def main():
         assert not session.proposal
         assert window.last_reply == "A game inventory."
 
+    monitor = Mock()
+    monitor.frame.return_value = (b"left", b"right")
+    with patch("assistant_app.__main__.select_source", return_value=monitor) as picker, \
+            patch("assistant_app.__main__.complete", side_effect=[
+                DraftResult("", "", True), DraftResult("Two monitors.", ""),
+                DraftResult("", "", True), DraftResult("Same two monitors.", ""),
+            ]) as model:
+        hear("Which app is on the left?")
+        settle()
+        hear("What is open on the right?")
+        settle()
+        picker.assert_called_once()
+        assert monitor.frame.call_count == 2
+        assert model.call_args.kwargs["image"] == (b"left", b"right")
+        assert window.stop_monitor_button.isVisible()
+        hear("stop sharing")
+        monitor.close.assert_called_once()
+        assert not window.stop_monitor_button.isVisible()
+    window.last_reply = "A game inventory."
+
     window.mic_path.setText("simulated-model")
     window.audio.read_audio = lambda *args: None
     window.mic.setChecked(True)
@@ -91,7 +118,23 @@ def main():
     assert not window.speaking
 
     hear("pause")
-    assert not session.active and not window.journal.toPlainText()
+    assert not session.active and "A game inventory." in window.journal.toPlainText()
+    work_chat = window.history.chat.id
+    window.new_chat()
+    assert "A game inventory." not in window.journal.toPlainText()
+    window.change_chat(work_chat)
+    assert "A game inventory." in window.journal.toPlainText()
+    assert window.last_reply == "Same two monitors."
+    window.model.setText("work-model")
+    window.profile_picker.setCurrentIndex(window.profile_picker.findData("play"))
+    assert window.model.text() != "work-model"
+    assert window.history.chat.id != work_chat
+    assert "A game inventory." not in window.journal.toPlainText()
+    window.profile_picker.setCurrentIndex(window.profile_picker.findData("work"))
+    assert window.history.chat.id == work_chat
+    assert window.model.text() == "work-model"
+    window.history.close()
+    scratch.cleanup()
     print("Voice dashboard, clarification, window routing, playback isolation and voice approval passed.")
 
 

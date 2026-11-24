@@ -2,6 +2,7 @@
 import os
 import shutil
 import subprocess
+from threading import Lock
 from time import monotonic
 from uuid import uuid4
 
@@ -93,7 +94,36 @@ def read_frame(descriptor, node, cancel):
         raise RuntimeError("The selected source did not produce a frame in time.")
 
 
-def capture_frame(source_type, cancel):
+class SharedSource:
+    def __init__(self, bus, session, nodes):
+        self.bus, self.session, self.nodes = bus, session, nodes
+        self.closed = False
+        self.lock = Lock()
+
+    def close(self):
+        with self.lock:
+            if not self.closed:
+                self.closed = True
+                close_object(self.bus, self.session, SESSION)
+
+    def frame(self, cancel):
+        images = tuple(self.read_node(node, cancel) for node in self.nodes)
+        return images[0] if len(images) == 1 else images
+
+    def read_node(self, node, cancel):
+        if self.closed or cancel.is_set():
+            raise CaptureCanceled()
+        response, fds = self.bus.call_with_unix_fd_list_sync(
+            BUS_NAME, PORTAL, CAST, "OpenPipeWireRemote", GLib.Variant("(oa{sv})", (self.session, {})),
+            GLib.VariantType.new("(h)"), Gio.DBusCallFlags.NONE, 5000, None, None)
+        descriptor = fds.get(response.unpack()[0])
+        try:
+            return read_frame(descriptor, node, cancel)
+        finally:
+            os.close(descriptor)
+
+
+def select_source(source_type, cancel):
     if source_type not in (WINDOW, MONITOR):
         raise ValueError("Unknown desktop capture type.")
     if not shutil.which("gst-launch-1.0"):
@@ -117,7 +147,7 @@ def capture_frame(source_type, cancel):
             raise CaptureCanceled()
         portal_request(bus, context, cancel, "SelectSources", "(oa{sv})", (session,), {
             "types": GLib.Variant("u", source_type),
-            "multiple": GLib.Variant("b", False),
+            "multiple": GLib.Variant("b", source_type == MONITOR),
         })
         if cancel.is_set():
             raise CaptureCanceled()
@@ -125,18 +155,20 @@ def capture_frame(source_type, cancel):
         if cancel.is_set():
             raise CaptureCanceled()
         streams = result.get("streams", [])
-        if len(streams) != 1:
-            raise RuntimeError("Choose one window or screen.")
-        node = streams[0][0]
-        response, fds = bus.call_with_unix_fd_list_sync(
-            BUS_NAME, PORTAL, CAST, "OpenPipeWireRemote", GLib.Variant("(oa{sv})", (session, {})),
-            GLib.VariantType.new("(h)"), Gio.DBusCallFlags.NONE, 5000, None, None)
-        descriptor = fds.get(response.unpack()[0])
-        try:
-            return read_frame(descriptor, node, cancel)
-        finally:
-            os.close(descriptor)
+        if not streams or (source_type == WINDOW and len(streams) != 1):
+            raise RuntimeError("Choose the window or monitors you want to share.")
+        shared = SharedSource(bus, session, tuple(stream[0] for stream in streams))
+        session = None
+        return shared
     finally:
         if session:
             close_object(bus, session, SESSION)
         context.pop_thread_default()
+
+
+def capture_frame(source_type, cancel):
+    shared = select_source(source_type, cancel)
+    try:
+        return shared.frame(cancel)
+    finally:
+        shared.close()
