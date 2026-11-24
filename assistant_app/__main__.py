@@ -881,7 +881,8 @@ class Window(QMainWindow):
         self.waiting_for_share = None
         kind = "general" if voice else self.workflow.currentData()
         has_app = True
-        if re.search(r"\brider\b", words):
+        if re.search(r"\brider\b", words) and (not voice or
+                re.search(r"\b(prompt|draft|selection|finish|rewrite|replace)\b", words)):
             kind = "rider"
         elif "unity" in words and any(value in words for value in ("prefab", "dialog", "connect")):
             kind = "unity"
@@ -941,7 +942,7 @@ class Window(QMainWindow):
         self.model_job = job
         self.message("Preparing a reply.")
 
-        may_view = self.auto_view.isChecked() and kind == "general"
+        may_view = self.auto_view.isChecked() and kind != "rider"
 
         def generate():
             try:

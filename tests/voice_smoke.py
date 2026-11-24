@@ -80,9 +80,9 @@ def main():
                 DraftResult("", "", True), DraftResult("Two monitors.", ""),
                 DraftResult("", "", True), DraftResult("Same two monitors.", ""),
             ]) as model:
-        hear("Which app is on the left?")
+        hear("Which file is visible in Rider?")
         settle()
-        hear("What is open on the right?")
+        hear("What is visible in my browser?")
         settle()
         picker.assert_called_once()
         assert monitor.frame.call_count == 2
