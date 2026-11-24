@@ -187,13 +187,15 @@ namespace WorkAssistant
 
         private bool Apply(Capture target)
         {
+            string projectFolder = System.IO.Path.GetDirectoryName(Application.dataPath);
+            string assetFile = System.IO.Path.Combine(projectFolder, target.Path);
             if (!ReferenceEquals(target.Stage, PrefabStageUtility.GetCurrentPrefabStage()) ||
                 target.Stage.assetPath != target.Path || !Inside(target.Stage, target.Source) ||
                 !Inside(target.Stage, target.Destination) || Describe(target.Source) != target.SourceLabel ||
                 Describe(target.Destination) != target.DestinationLabel ||
                 EditorJsonUtility.ToJson(target.Source) != target.Revision ||
                 !AssetDatabase.IsOpenForEdit(target.Path, StatusQueryOptions.ForceUpdate) ||
-                !File.Exists(target.Path) || new FileInfo(target.Path).IsReadOnly)
+                !File.Exists(assetFile) || new FileInfo(assetFile).IsReadOnly)
                 return false;
 
             using (var serialized = new SerializedObject(target.Source))

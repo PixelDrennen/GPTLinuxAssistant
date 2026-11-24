@@ -37,7 +37,7 @@ Enable **GPT Linux Assistant** in System Settings → Window Management → KWin
 
 ### Rider
 
-1. With JDK 21 and Gradle 9 installed, run `gradle -p rider buildPlugin` from the repository. To target another supported Rider version, add `-PriderVersion=<version>`.
+1. Install a JDK that can read your Rider build's classes, such as JDK 25 for Rider 2026.2 or JDK 21 for Rider 2025.3. Run `bash rider/build-local.sh /path/to/Rider`, pointing to your installed Rider directory containing `lib/`. The build uses that installation's SDK jars.
 2. In Rider, use Settings → Plugins → ⚙ → **Install Plugin from Disk** and choose the ZIP in `rider/build/distributions/`. Restart Rider if prompted.
 3. In the assistant, start the session and enable **Rider**. Select text in a Rider editor or scratch file and right-click → **Share Selection with Work Assistant**. Ask “Finish writing this prompt for me in Rider.” Approve the exact replacement in the panel. The selected document and text range must still match when the edit runs.
 4. The assistant leaves prompt submission to you. Rider's AI chat composer is outside this integration.
