@@ -11,9 +11,9 @@ from gi.repository import Gio, GLib
 
 BUS_NAME = "org.freedesktop.portal.Desktop"
 PORTAL = "/org/freedesktop/portal/desktop"
-CAST = f"{BUS_NAME}.ScreenCast"
-REQUEST = f"{BUS_NAME}.Request"
-SESSION = f"{BUS_NAME}.Session"
+CAST = "org.freedesktop.portal.ScreenCast"
+REQUEST = "org.freedesktop.portal.Request"
+SESSION = "org.freedesktop.portal.Session"
 WINDOW = 2
 MONITOR = 1
 
