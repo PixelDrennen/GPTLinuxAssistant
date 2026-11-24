@@ -21,12 +21,13 @@ from .speech import Microphone
 
 
 class Window(QMainWindow):
-    drafted = pyqtSignal(object, str, str)
+    drafted = pyqtSignal(object, object, str)
 
     def __init__(self, session, args):
         super().__init__()
         self.session = session
         self.audio = Microphone()
+        self.audio.ready.connect(self.audio_ready)
         self.audio.heard.connect(self.heard)
         self.audio.failed.connect(self.audio_failed)
         self.drafted.connect(self.draft_finished)
@@ -39,10 +40,10 @@ class Window(QMainWindow):
         self.setWindowTitle("GPT Linux Assistant")
         self.resize(760, 760)
         root = QWidget()
-        scroller = QScrollArea()
-        scroller.setWidgetResizable(True)
-        scroller.setWidget(root)
-        self.setCentralWidget(scroller)
+        self.scroller = QScrollArea()
+        self.scroller.setWidgetResizable(True)
+        self.scroller.setWidget(root)
+        self.setCentralWidget(self.scroller)
         stack = QVBoxLayout(root)
 
         self.state = self.label("")
@@ -251,6 +252,10 @@ class Window(QMainWindow):
             self.audio_status = "Starting microphone"
             self.audio.start(path)
 
+    def audio_ready(self, generation):
+        if generation == self.audio.generation and self.mode is None:
+            self.audio_status = "Microphone listening"
+
     def audio_failed(self, generation, message):
         if generation == self.audio.generation:
             self.mode = None
@@ -355,8 +360,8 @@ class Window(QMainWindow):
             try:
                 result = complete(model, original, request, context, kind)
                 self.drafted.emit(job, result, "")
-            except (OSError, ValueError, AttributeError) as exc:
-                self.drafted.emit(job, "", str(exc))
+            except (OSError, ValueError) as exc:
+                self.drafted.emit(job, None, str(exc))
 
         Thread(target=generate, daemon=True).start()
 
@@ -376,8 +381,11 @@ class Window(QMainWindow):
         if error:
             self.message("Draft generation failed. " + error)
             return
-        self.output.setPlainText(result)
-        self.message("Draft ready to preview.")
+        if result.question:
+            self.message(result.question + "\nAdd the answer to the Task field.")
+            self.request.setFocus()
+            return
+        self.output.setPlainText(result.draft)
         self.preview_draft()
 
     def preview_draft(self):
@@ -510,6 +518,8 @@ class Window(QMainWindow):
                 span = proposal.target.data
                 label += f' · Selected range {span["start"]}–{span["end"]}'
             self.target_label.setText(label)
+            if proposal:
+                QTimer.singleShot(0, lambda: self.scroller.ensureWidgetVisible(self.review, 0, 0))
         self.voice_ack.setEnabled(self.mic.isChecked())
 
 

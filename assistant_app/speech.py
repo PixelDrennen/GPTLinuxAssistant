@@ -7,6 +7,7 @@ from PyQt5.QtCore import QObject, pyqtSignal
 
 
 class Microphone(QObject):
+    ready = pyqtSignal(int)
     heard = pyqtSignal(int, str, float)
     failed = pyqtSignal(int, str)
 
@@ -56,12 +57,16 @@ class Microphone(QObject):
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 self.process = process
             try:
+                ready = False
                 while not cancel.is_set():
                     audio = process.stdout.read(3200)
                     if not audio:
                         if not cancel.is_set():
                             raise RuntimeError("PipeWire recording ended. Check the microphone and pw-record.")
                         break
+                    if not ready and not cancel.is_set():
+                        self.ready.emit(generation)
+                        ready = True
                     if recognizer.AcceptWaveform(audio):
                         result = json.loads(recognizer.Result())
                         if result.get("text") and not cancel.is_set():

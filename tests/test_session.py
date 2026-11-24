@@ -69,6 +69,17 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(self.session.command)
         self.assertIsNone(self.session.proposal)
 
+    def test_web_and_slack_offers_only_choose_a_workflow(self):
+        self.session.windows_enabled = True
+        self.session.observe("firefox", ["firefox"])
+        self.session.narrate("I want to summarize this article.")
+        self.assertEqual("browser", self.session.suggestion)
+        self.now += 61
+        self.session.observe("slack", ["slack"])
+        self.session.narrate("I need to draft a reply in this thread.")
+        self.assertEqual("slack", self.session.suggestion)
+        self.assertIsNone(self.session.proposal)
+
     def test_desktop_preview_uses_same_single_proposal(self):
         desktop = self.session.propose_desktop("copy", "Slack reply")
         self.assertEqual("Slack reply", desktop.after)

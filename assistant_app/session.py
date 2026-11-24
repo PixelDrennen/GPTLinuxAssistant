@@ -120,10 +120,12 @@ class Session:
                 task = {"unity": "connecting dialogue in Unity", "slack": "preparing a Slack message or summary",
                         "browser": "summarizing a web page"}[self.suggestion]
                 return f"Likely task: {task}\nFrom your narration and open apps."
+            details = []
+            if self.focus:
+                details.append(f"Focused app: {self.focus}")
             if speech:
-                prefix = f"While using {self.focus}" if self.focus else "Recent narration"
-                return f'{prefix}: “{speech}”'
-            return f"Focused app: {self.focus}" if self.focus else "Waiting for narration or window context"
+                details.append(f'Recent narration: “{speech}”')
+            return "\n".join(details) or "Waiting for narration or window context"
 
     def capture(self, kind, capture, label, data):
         with self.lock:
