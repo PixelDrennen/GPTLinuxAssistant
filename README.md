@@ -16,8 +16,10 @@ A voice-first tray assistant for Fedora KDE Plasma 6 on Wayland. Start a listeni
 sudo dnf install python3-qt5 python3-gobject qt5-qtwayland pipewire-utils espeak-ng libsecret
 git clone https://github.com/PixelDrennen/GPTLinuxAssistant.git
 cd GPTLinuxAssistant
-/usr/bin/python3 -m assistant_app
+/usr/bin/python3 scripts/install-launcher.py
 ```
+
+Open **GPT Linux Assistant** from KDE’s Applications menu or search for it in KRunner. The launcher uses the checkout’s `.venv/bin/python` when available and otherwise uses system Python. If you move the checkout, run the installer again from its new location.
 
 The app launches paused. A configured Vosk model enables the microphone when you select **Start listening**. Conversation, spoken replies, app context, editor bridges, and on-demand monitor context are on by default once their dependencies are installed. **Setup** lets you turn them off per profile. Use **Pause**, the tray menu, or “pause” to stop collection and revoke pending approvals and monitor access. Saved chat history remains available. The KDE screen-lock signal also pauses collection. Unlocking leaves it paused.
 
