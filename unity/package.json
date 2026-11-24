@@ -1,0 +1,14 @@
+{
+  "name": "io.github.pixeldrennen.work-assistant",
+  "displayName": "GPT Linux Assistant Bridge",
+  "version": "0.1.0",
+  "unity": "2022.3",
+  "description": "Share a single prefab reference for a previewed, undoable edit.",
+  "samples": [
+    {
+      "displayName": "Dialogue Reference Example",
+      "description": "A minimal component for testing reference approval.",
+      "path": "Samples~/Dialogue"
+    }
+  ]
+}

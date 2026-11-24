@@ -32,7 +32,7 @@ Enable **GPT Linux Assistant** in System Settings → Window Management → KWin
 ### Voice and drafting
 
 - For local speech recognition, create a virtual environment with `/usr/bin/python3 -m venv --system-site-packages .venv`, install with `.venv/bin/python -m pip install vosk`, and download and extract an English model from the [Vosk model catalog](https://alphacephei.com/vosk/models). Launch with `.venv/bin/python -m assistant_app --vosk-model /path/to/extracted/model` and turn on **Use microphone (Vosk)**.
-- Narrate normally to give the assistant context. Use **Ask by voice** or start a request with “Assistant” to address it directly. When a preview is visible, click **Answer by voice** and say “yes” or “no,” or use the approval buttons. A “yes” in regular narration cannot approve anything. Quiet mode suppresses proactive offers.
+- Narrate normally to give the assistant context. Use **Ask by voice** or start a request with “Assistant” to address it directly. When a preview is visible, click **Answer by voice** and say “yes” or “no,” or use the approval buttons. A “yes” in regular narration cannot approve anything. Unity, Slack, and browser offers use recent narration and open app identities. Quiet mode suppresses proactive offers.
 - For generated drafts, run [Ollama](https://ollama.com/) with a downloaded local model and cloud features disabled (`OLLAMA_NO_CLOUD=1` in the Ollama server environment). Enter the model name in the app and tell it what to draft. The app sends the requested text to Ollama on loopback and includes recent narration only if you enable that option. If you prefer to skip model setup, type the replacement directly in **Draft** and use the preview button.
 
 ### Rider

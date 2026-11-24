@@ -1,0 +1,11 @@
+{
+  "KPlugin": {
+    "Id": "gpt-linux-assistant",
+    "Name": "GPT Linux Assistant",
+    "Description": "Share application identities with GPT Linux Assistant while observation is enabled.",
+    "Version": "0.1.0"
+  },
+  "KPackageStructure": "KWin/Script",
+  "X-Plasma-API": "javascript",
+  "X-Plasma-MainScript": "code/main.js"
+}

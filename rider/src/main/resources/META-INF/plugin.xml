@@ -1,0 +1,15 @@
+<idea-plugin>
+    <id>io.github.pixeldrennen.workassistant.rider</id>
+    <name>GPT Linux Assistant Bridge</name>
+    <vendor>PixelDrennen</vendor>
+    <depends>com.intellij.modules.rider</depends>
+    <description>Share a selected Rider draft with GPT Linux Assistant.</description>
+    <actions>
+        <action id="WorkAssistant.ShareSelection"
+                class="workassistant.ShareSelection"
+                text="Share Selection with Work Assistant"
+                description="Share selected editor text for a previewed, undoable edit">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+    </actions>
+</idea-plugin>
